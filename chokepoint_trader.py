@@ -26,6 +26,12 @@ import math
 import os
 import re
 import sqlite3
+
+try:
+    import monitor_db as mdb
+    _HAS_DB = True
+except ImportError:
+    _HAS_DB = False
 import ssl
 import sys
 import time
@@ -1007,6 +1013,12 @@ def run_scan(dingtalk=False, ticker_filter=None, verbose=True):
         })
         state["signals_history"][ticker] = state["signals_history"][ticker][-30:]
 
+        if _HAS_DB:
+            try:
+                mdb.save_signal(ticker, ind["date"], price, score, signal)
+            except Exception:
+                pass
+
     scan_results.sort(key=lambda r: r["score"], reverse=True)
 
     macro = None
@@ -1018,6 +1030,19 @@ def run_scan(dingtalk=False, ticker_filter=None, verbose=True):
     except Exception as e:
         if verbose:
             print(f"宏观数据获取失败: {e}")
+
+    if _HAS_DB and macro:
+        try:
+            mdb.save_macro(
+                date=datetime.datetime.now().strftime("%Y-%m-%d"),
+                sox=macro.get("sox"), sox_chg=macro.get("sox_chg"),
+                vxx=macro.get("vxx"), vxx_chg=macro.get("vxx_chg"),
+                usdjpy=macro.get("usdjpy"), fear_level=macro.get("fear_level"),
+                conditions_met=macro.get("conditions_met", 0),
+                entry_ready=1 if macro.get("entry_ready") else 0,
+            )
+        except Exception:
+            pass
 
     if verbose:
         print("\n" + "=" * 60)

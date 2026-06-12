@@ -140,19 +140,20 @@ def is_trend_suitable(symbol):
 # 自适应ATR追踪止损
 # ============================================================
 
-def adaptive_K(gain_pct, chg_5d):
+def adaptive_K(gain_pct, chg_5d, base_k=BASE_K, min_k=MIN_K):
     gain_adj = min(gain_pct / 10, 6) * 0.3
     accel_adj = 0.3 if chg_5d > 8 else 0
-    return max(MIN_K, BASE_K - gain_adj - accel_adj)
+    return max(min_k, base_k - gain_adj - accel_adj)
 
 
-def calc_trailing_stop(entry_price, highest_close, atr_val, chg_5d):
+def calc_trailing_stop(entry_price, highest_close, atr_val, chg_5d,
+                       base_k=BASE_K, min_k=MIN_K, hard_stop_pct=HARD_STOP_PCT):
     if atr_val is None or atr_val <= 0:
-        return highest_close * 0.95, BASE_K
+        return highest_close * 0.95, base_k
     gain_pct = max(0, (highest_close - entry_price) / entry_price * 100)
-    k = adaptive_K(gain_pct, chg_5d)
+    k = adaptive_K(gain_pct, chg_5d, base_k, min_k)
     stop = highest_close - k * atr_val
-    hard_stop = entry_price * (1 - HARD_STOP_PCT)
+    hard_stop = entry_price * (1 - hard_stop_pct)
     return max(stop, hard_stop), k
 
 
@@ -250,10 +251,11 @@ def check_entry(bars):
     return entry, details, extras
 
 
-def check_exit(bars, entry_price, highest_close):
+def check_exit(bars, entry_price, highest_close,
+               base_k=BASE_K, min_k=MIN_K, hard_stop_pct=HARD_STOP_PCT):
     n = len(bars)
     if n < 20:
-        return False, "", 0, BASE_K
+        return False, "", 0, base_k
 
     closes = [b["close"] for b in bars]
     highs = [b["high"] for b in bars]
@@ -266,15 +268,16 @@ def check_exit(bars, entry_price, highest_close):
 
     chg_5d = (price - closes[i - 5]) / closes[i - 5] * 100 if i >= 5 else 0
     new_highest = max(highest_close, price)
-    stop, k = calc_trailing_stop(entry_price, new_highest, atr[i], chg_5d)
+    stop, k = calc_trailing_stop(entry_price, new_highest, atr[i], chg_5d,
+                                 base_k, min_k, hard_stop_pct)
 
     if price < stop:
         gain = (price - entry_price) / entry_price * 100
         return True, f"追踪止损(K={k:.1f},stop={stop:.3f},gain={gain:+.1f}%)", stop, k
 
-    hard = entry_price * (1 - HARD_STOP_PCT)
+    hard = entry_price * (1 - hard_stop_pct)
     if price < hard:
-        return True, f"硬止损({HARD_STOP_PCT * 100:.0f}%,stop={hard:.3f})", stop, k
+        return True, f"硬止损({hard_stop_pct * 100:.0f}%,stop={hard:.3f})", stop, k
 
     if ma20[i] is not None and n >= 3:
         below_count = sum(1 for j in range(max(0, i - 2), i + 1) if closes[j] < ma20[j] and ma20[j] is not None)
@@ -307,7 +310,8 @@ def save_positions(data):
 # ============================================================
 
 class RightSideBacktest:
-    def __init__(self, bars, benchmark_bars=None, capital=CAPITAL_PER_TRADE):
+    def __init__(self, bars, benchmark_bars=None, capital=CAPITAL_PER_TRADE,
+                 base_k=BASE_K, min_k=MIN_K, hard_stop_pct=HARD_STOP_PCT):
         self.bars = bars
         self.benchmark_bars = benchmark_bars
         self.init_capital = capital
@@ -322,6 +326,9 @@ class RightSideBacktest:
         self.max_dd = 0
         self.dd_peak_date = ""
         self.dd_trough_date = ""
+        self.base_k = base_k
+        self.min_k = min_k
+        self.hard_stop_pct = hard_stop_pct
 
     def run(self):
         warmup = 60
@@ -333,7 +340,8 @@ class RightSideBacktest:
             if self.position > 0:
                 self.highest_close = max(self.highest_close, price)
                 should_exit, reason, stop, k = check_exit(
-                    window, self.entry_price, self.highest_close
+                    window, self.entry_price, self.highest_close,
+                    self.base_k, self.min_k, self.hard_stop_pct
                 )
                 if should_exit:
                     pnl_pct = (price - self.entry_price) / self.entry_price * 100
@@ -925,6 +933,281 @@ def cmd_calibrate(days=500):
 
 
 # ============================================================
+# 市场环境分段回测
+# ============================================================
+
+MARKET_PHASES = [
+    ("熊市阴跌",   "2024-01-02", "2024-09-23", "bear"),
+    ("暴涨行情",   "2024-09-24", "2024-10-08", "bull"),
+    ("冲高回落",   "2024-10-09", "2024-11-30", "bear"),
+    ("震荡筑底",   "2024-12-01", "2025-03-31", "sideways"),
+    ("反弹行情",   "2025-04-01", "2025-07-31", "bull"),
+    ("震荡盘整",   "2025-08-01", "2025-12-31", "sideways"),
+    ("慢牛行情",   "2026-01-01", "2026-06-30", "bull"),
+]
+
+
+def _phase_for_date(date_str):
+    for name, start, end, ptype in MARKET_PHASES:
+        if start <= date_str <= end:
+            return name, ptype
+    return "其他", "unknown"
+
+
+def _calc_bench_phase_return(bench_bars, start, end):
+    start_price, end_price = None, None
+    for b in bench_bars:
+        if b["date"] >= start and start_price is None:
+            start_price = b["close"]
+        if b["date"] <= end:
+            end_price = b["close"]
+    if start_price and end_price and start_price > 0:
+        return (end_price - start_price) / start_price * 100
+    return 0
+
+
+def cmd_backtest_env(symbol, days=1000):
+    conn = init_db()
+    print(f"拉取 {symbol} ({days}天)...", end="", flush=True)
+    update_cn_ticker(conn, symbol, verbose=False)
+    update_cn_ticker(conn, BENCHMARK, verbose=False)
+    bars = get_bars(conn, symbol, days + 100)
+    bench = get_bars(conn, BENCHMARK, days + 100)
+    conn.close()
+    print(f" {len(bars)}条K线")
+
+    if len(bars) < 80:
+        print(f"数据不足({len(bars)})")
+        return None
+
+    name = _resolve_name(symbol)
+    label = f"{name}({symbol})" if name else symbol
+
+    bt = RightSideBacktest(bars, bench)
+    bt.run()
+
+    if not bt.trades:
+        print("无交易记录")
+        return None
+
+    phase_stats = {}
+    for phase_name, start, end, ptype in MARKET_PHASES:
+        phase_stats[phase_name] = {
+            "type": ptype, "start": start, "end": end,
+            "trades": [], "bench_ret": _calc_bench_phase_return(bench, start, end),
+        }
+
+    for t in bt.trades:
+        pname, _ = _phase_for_date(t["entry_date"])
+        if pname in phase_stats:
+            phase_stats[pname]["trades"].append(t)
+
+    print(f"\n{'=' * 72}")
+    print(f"  市场环境回测 | {label} | {len(bars)}天")
+    print(f"{'=' * 72}")
+    print(f"  {'阶段':<8s} {'类型':<8s} {'基准':>6s} {'交易':>4s} {'胜率':>5s} {'平均盈':>7s} {'平均亏':>7s} {'阶段PnL':>8s}")
+    print(f"  {'-' * 66}")
+
+    type_agg = {"bull": [], "bear": [], "sideways": []}
+
+    for phase_name, start, end, ptype in MARKET_PHASES:
+        ps = phase_stats[phase_name]
+        trades = ps["trades"]
+        n_trades = len(trades)
+        if n_trades == 0:
+            print(f"  {phase_name:<8s} {ptype:<8s} {ps['bench_ret']:+5.1f}%    0     -       -       -       -")
+            continue
+
+        wins = [t for t in trades if t["pnl_pct"] > 0]
+        losses = [t for t in trades if t["pnl_pct"] <= 0]
+        wr = len(wins) / n_trades * 100
+        avg_w = sum(t["pnl_pct"] for t in wins) / len(wins) if wins else 0
+        avg_l = sum(t["pnl_pct"] for t in losses) / len(losses) if losses else 0
+        total_pnl = sum(t["pnl_pct"] for t in trades)
+
+        print(f"  {phase_name:<8s} {ptype:<8s} {ps['bench_ret']:+5.1f}% {n_trades:4d} {wr:4.0f}% {avg_w:+6.1f}% {avg_l:+6.1f}% {total_pnl:+7.1f}%")
+
+        for t in trades:
+            type_agg[ptype].append(t)
+
+    print(f"\n  {'─' * 50}")
+    print(f"  汇总:")
+    for ptype, label_cn in [("bull", "牛市"), ("bear", "熊市"), ("sideways", "震荡")]:
+        trades = type_agg[ptype]
+        if not trades:
+            print(f"    {label_cn}: 无交易")
+            continue
+        wins = [t for t in trades if t["pnl_pct"] > 0]
+        wr = len(wins) / len(trades) * 100
+        avg_pnl = sum(t["pnl_pct"] for t in trades) / len(trades)
+        total_pnl = sum(t["pnl_pct"] for t in trades)
+        print(f"    {label_cn}: {len(trades)}笔 胜率{wr:.0f}% 单均{avg_pnl:+.1f}% 合计{total_pnl:+.1f}%")
+
+    bt.report(label)
+    return {"trades": bt.trades, "phase_stats": phase_stats, "type_agg": type_agg}
+
+
+def cmd_backtest_env_all(days=1000):
+    conn = init_db()
+    print("更新基准...", end="", flush=True)
+    update_cn_ticker(conn, BENCHMARK, verbose=False)
+    print(" OK")
+
+    symbols = [(n, cfg["symbol"]) for n, cfg in ETF_BASKET.items()]
+    for _, sym in symbols:
+        try:
+            update_cn_ticker(conn, sym, verbose=False)
+        except Exception:
+            pass
+
+    bench = get_bars(conn, BENCHMARK, days + 100)
+
+    type_all = {"bull": [], "bear": [], "sideways": []}
+    per_etf = []
+
+    print(f"\n扫描{len(symbols)}个ETF({days}天)...\n")
+    for name, sym in symbols:
+        bars = get_bars(conn, sym, days + 100)
+        if len(bars) < 80:
+            continue
+
+        bt = RightSideBacktest(bars, bench)
+        bt.run()
+        if not bt.trades:
+            continue
+
+        etf_type = {"bull": [], "bear": [], "sideways": []}
+        for t in bt.trades:
+            _, ptype = _phase_for_date(t["entry_date"])
+            if ptype in etf_type:
+                etf_type[ptype].append(t)
+                type_all[ptype].append(t)
+
+        per_etf.append({"name": name, "symbol": sym, "by_type": etf_type, "trades": bt.trades})
+
+    conn.close()
+
+    print(f"\n{'=' * 78}")
+    print(f"  全市场分环境回测 | {len(per_etf)}个ETF | {days}天")
+    print(f"{'=' * 78}")
+
+    for ptype, label_cn in [("bull", "牛市"), ("bear", "熊市"), ("sideways", "震荡")]:
+        all_trades = type_all[ptype]
+        if not all_trades:
+            continue
+        wins = [t for t in all_trades if t["pnl_pct"] > 0]
+        wr = len(wins) / len(all_trades) * 100
+        avg_pnl = sum(t["pnl_pct"] for t in all_trades) / len(all_trades)
+        total_pnl = sum(t["pnl_pct"] for t in all_trades)
+        print(f"\n  【{label_cn}】{len(all_trades)}笔交易 | 胜率{wr:.0f}% | 单均{avg_pnl:+.1f}% | 合计{total_pnl:+.1f}%")
+
+        ranked = []
+        for e in per_etf:
+            trades = e["by_type"][ptype]
+            if not trades:
+                continue
+            pnl = sum(t["pnl_pct"] for t in trades)
+            w = sum(1 for t in trades if t["pnl_pct"] > 0)
+            ranked.append({"name": e["name"], "trades": len(trades),
+                           "wr": w / len(trades) * 100, "pnl": pnl})
+
+        ranked.sort(key=lambda x: -x["pnl"])
+        top = ranked[:8]
+        bottom = ranked[-3:] if len(ranked) > 8 else []
+
+        print(f"    {'标的':<8s} {'交易':>4s} {'胜率':>5s} {'合计PnL':>8s}")
+        print(f"    {'-' * 35}")
+        for r in top:
+            print(f"    {r['name']:<8s} {r['trades']:4d} {r['wr']:4.0f}% {r['pnl']:+7.1f}%")
+        if bottom and bottom[0] != top[-1]:
+            print(f"    ...")
+            for r in bottom:
+                print(f"    {r['name']:<8s} {r['trades']:4d} {r['wr']:4.0f}% {r['pnl']:+7.1f}%")
+
+    print(f"\n{'─' * 50}")
+    print("  结论:")
+    for ptype, label_cn in [("bull", "牛市"), ("bear", "熊市"), ("sideways", "震荡")]:
+        all_t = type_all[ptype]
+        if not all_t:
+            continue
+        wins = [t for t in all_t if t["pnl_pct"] > 0]
+        losses = [t for t in all_t if t["pnl_pct"] <= 0]
+        avg_w = sum(t["pnl_pct"] for t in wins) / len(wins) if wins else 0
+        avg_l = sum(t["pnl_pct"] for t in losses) / len(losses) if losses else 0
+        wr = len(wins) / len(all_t) * 100
+        print(f"    {label_cn}: 胜率{wr:.0f}% 平均盈{avg_w:+.1f}% 平均亏{avg_l:+.1f}% 盈亏比{abs(avg_w/avg_l):.1f}" if avg_l != 0 else f"    {label_cn}: 胜率{wr:.0f}% 平均盈{avg_w:+.1f}%")
+
+
+# ============================================================
+# 参数敏感性测试
+# ============================================================
+
+def cmd_param_test(symbol, days=1000):
+    conn = init_db()
+    print(f"拉取 {symbol} ({days}天)...", end="", flush=True)
+    update_cn_ticker(conn, symbol, verbose=False)
+    update_cn_ticker(conn, BENCHMARK, verbose=False)
+    bars = get_bars(conn, symbol, days + 100)
+    bench = get_bars(conn, BENCHMARK, days + 100)
+    conn.close()
+    print(f" {len(bars)}条K线")
+
+    if len(bars) < 80:
+        print(f"数据不足({len(bars)})")
+        return
+
+    name = _resolve_name(symbol)
+    label = f"{name}({symbol})" if name else symbol
+
+    param_sets = [
+        (3.0, 1.2, 0.08, "3.0→1.2  8% ← 当前"),
+        (2.5, 1.0, 0.08, "2.5→1.0  8%"),
+        (2.5, 1.2, 0.08, "2.5→1.2  8%"),
+        (3.0, 1.5, 0.08, "3.0→1.5  8%"),
+        (3.5, 1.2, 0.08, "3.5→1.2  8%"),
+        (3.5, 1.5, 0.08, "3.5→1.5  8%"),
+        (3.0, 1.2, 0.06, "3.0→1.2  6%"),
+        (3.0, 1.2, 0.10, "3.0→1.2 10%"),
+        (3.0, 1.2, 0.12, "3.0→1.2 12%"),
+    ]
+
+    print(f"\n{'=' * 72}")
+    print(f"  参数敏感性 | {label} | {len(bars)}天")
+    print(f"{'=' * 72}")
+    print(f"  {'参数':<18s} {'总收益':>7s} {'回撤':>6s} {'交易':>4s} {'胜率':>5s} {'均盈':>6s} {'均亏':>6s} {'Sharpe':>6s}")
+    print(f"  {'-' * 65}")
+
+    for base_k, min_k, hard_stop, desc in param_sets:
+        bt = RightSideBacktest(bars, bench, base_k=base_k, min_k=min_k, hard_stop_pct=hard_stop)
+        bt.run()
+
+        if not bt.equity_curve:
+            print(f"  {desc:<18s}   无数据")
+            continue
+
+        final = bt.equity_curve[-1]["equity"]
+        ret = (final - bt.init_capital) / bt.init_capital * 100
+        wins = [t for t in bt.trades if t["pnl_pct"] > 0]
+        losses = [t for t in bt.trades if t["pnl_pct"] <= 0]
+        wr = len(wins) / len(bt.trades) * 100 if bt.trades else 0
+        avg_w = sum(t["pnl_pct"] for t in wins) / len(wins) if wins else 0
+        avg_l = sum(t["pnl_pct"] for t in losses) / len(losses) if losses else 0
+
+        dr = []
+        for j in range(1, len(bt.equity_curve)):
+            p = bt.equity_curve[j - 1]["equity"]
+            if p > 0:
+                dr.append((bt.equity_curve[j]["equity"] - p) / p)
+        avg_dr = sum(dr) / len(dr) if dr else 0
+        std_dr = math.sqrt(sum((r - avg_dr) ** 2 for r in dr) / len(dr)) if len(dr) > 1 else 1
+        sharpe = (avg_dr / std_dr) * math.sqrt(244) if std_dr > 0 else 0
+
+        print(f"  {desc:<18s} {ret:+6.1f}% {bt.max_dd*100:5.1f}% {len(bt.trades):4d} {wr:4.0f}% {avg_w:+5.1f}% {avg_l:+5.1f}% {sharpe:5.2f}")
+
+    print(f"\n  注: 当前参数为 Base_K=3.0, Min_K=1.2, 硬止损=8%")
+
+
+# ============================================================
 # 入口
 # ============================================================
 
@@ -980,6 +1263,34 @@ def main():
             if idx + 1 < len(args):
                 d = int(args[idx + 1])
         cmd_calibrate(d)
+
+    elif cmd == "backtest-env":
+        if len(args) < 2:
+            print("用法: a_etf_trend.py backtest-env <symbol> [--days N]")
+            return
+        d = 1000
+        if "--days" in args:
+            idx = args.index("--days")
+            if idx + 1 < len(args):
+                d = int(args[idx + 1])
+        cmd_backtest_env(args[1], d)
+
+    elif cmd == "backtest-env-all":
+        d = 1000
+        if "--days" in args:
+            idx = args.index("--days")
+            if idx + 1 < len(args):
+                d = int(args[idx + 1])
+        cmd_backtest_env_all(d)
+
+    elif cmd == "param-test":
+        sym = args[1] if len(args) >= 2 else "sz159516"
+        d = 1000
+        if "--days" in args:
+            idx = args.index("--days")
+            if idx + 1 < len(args):
+                d = int(args[idx + 1])
+        cmd_param_test(sym, d)
 
     else:
         print(f"未知命令: {cmd}")
