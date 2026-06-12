@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>投研系统 | Adversarial Investment Research</title>
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <header class="hdr">
+    <div class="ctr">
+      <h1>投研系统</h1>
+      <p class="sub">对抗式深度研判 — 牛熊辩论 + 风险官裁决</p>
+    </div>
+  </header>
+
+  <nav class="tabs ctr">
+    <button class="tab active" data-tab="dashboard">NDX-100 仪表盘</button>
+    <button class="tab" data-tab="stock">标的分析</button>
+    <button class="tab" data-tab="portfolio">组合评估</button>
+    <button class="tab" data-tab="history">历史记录</button>
+  </nav>
+
+  <main class="ctr">
+    <!-- Dashboard Tab -->
+    <section id="tab-dashboard" class="tab-panel active">
+      <div class="card">
+        <div class="dash-header">
+          <div>
+            <h2>NDX-100 全量分析仪表盘</h2>
+            <p class="desc">纳斯达克100逐只深度分析 — 基本面AI裁决 + 技术面量化信号 + 综合操作建议</p>
+          </div>
+          <button id="batch-start-btn" class="batch-btn">启动全量分析</button>
+        </div>
+        <div id="batch-progress" class="progress-box hidden">
+          <div class="progress-bar"><div class="progress-fill" id="batch-fill"></div></div>
+          <div class="progress-text" id="batch-stage"></div>
+        </div>
+        <div id="dash-stats" class="dash-stats hidden"></div>
+        <div id="dash-filters" class="dash-filters hidden">
+          <select id="filter-verdict">
+            <option value="">全部裁决</option>
+            <option value="Strong Buy">Strong Buy</option>
+            <option value="Buy">Buy</option>
+            <option value="Hold">Hold</option>
+            <option value="Sell">Sell</option>
+            <option value="Strong Sell">Strong Sell</option>
+          </select>
+          <select id="filter-signal">
+            <option value="">全部信号</option>
+            <option value="STRONG_BUY">强买</option>
+            <option value="BUY">买入</option>
+            <option value="NEUTRAL">中性</option>
+            <option value="SELL">卖出</option>
+            <option value="STRONG_SELL">强卖</option>
+          </select>
+          <select id="sort-by">
+            <option value="score-desc">评分高→低</option>
+            <option value="score-asc">评分低→高</option>
+            <option value="rsi-asc">RSI低→高</option>
+            <option value="rsi-desc">RSI高→低</option>
+            <option value="ticker">代码 A-Z</option>
+          </select>
+        </div>
+        <div id="dash-table-wrap" class="hidden">
+          <table id="dash-table" class="dash-table">
+            <thead>
+              <tr>
+                <th>标的</th>
+                <th>价格</th>
+                <th>AI评分</th>
+                <th>AI裁决</th>
+                <th>技术信号</th>
+                <th>RSI</th>
+                <th>MACD</th>
+                <th>量比</th>
+                <th>操作建议</th>
+              </tr>
+            </thead>
+            <tbody id="dash-tbody"></tbody>
+          </table>
+        </div>
+        <div id="dash-empty" class="empty-state">
+          <p>暂无数据。点击"启动全量分析"开始对 NDX-100 逐只分析。</p>
+          <p class="desc">首次全量分析约需 30-60 分钟（技术面 ~2分钟 + AI分析 ~50分钟）<br>已缓存的标的将自动跳过。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Stock Analysis Tab -->
+    <section id="tab-stock" class="tab-panel">
+      <div class="card">
+        <h2>单标的深度分析</h2>
+        <p class="desc">输入股票代码，系统将通过牛熊对抗 + 风险官裁决框架，输出六维评分与结构化投研报告。</p>
+        <form id="stock-form">
+          <div class="input-row">
+            <input type="text" id="ticker-input" placeholder="输入股票代码 (e.g. NVDA, AAPL, TSLA)" autocomplete="off">
+            <button type="submit" id="stock-btn">开始分析</button>
+          </div>
+        </form>
+        <div id="stock-progress" class="progress-box hidden">
+          <div class="progress-bar"><div class="progress-fill" id="stock-fill"></div></div>
+          <div class="progress-text" id="stock-stage"></div>
+        </div>
+        <div id="stock-result" class="result-box hidden"></div>
+      </div>
+    </section>
+
+    <!-- Portfolio Tab -->
+    <section id="tab-portfolio" class="tab-panel">
+      <div class="card">
+        <h2>投资组合评估</h2>
+        <p class="desc">输入持仓组合，系统将评估胜率、赔率、时间成本、机会成本与集中度，给出 A-F 评级。</p>
+        <form id="portfolio-form">
+          <div id="positions-list">
+            <div class="pos-row">
+              <input type="text" placeholder="代码 (e.g. NVDA)" class="pos-ticker">
+              <input type="number" placeholder="股数" class="pos-shares" min="1">
+              <input type="number" placeholder="成本价" class="pos-cost" step="0.01">
+              <select class="pos-horizon">
+                <option value="6months">6个月</option>
+                <option value="1year" selected>1年</option>
+                <option value="3years">3年</option>
+                <option value="5years">5年+</option>
+              </select>
+              <button type="button" class="pos-remove" title="删除">&times;</button>
+            </div>
+          </div>
+          <div class="form-actions">
+            <button type="button" id="add-pos-btn">+ 添加持仓</button>
+            <button type="submit" id="portfolio-btn">评估组合</button>
+          </div>
+        </form>
+        <div id="portfolio-progress" class="progress-box hidden">
+          <div class="progress-bar"><div class="progress-fill" id="portfolio-fill"></div></div>
+          <div class="progress-text" id="portfolio-stage"></div>
+        </div>
+        <div id="portfolio-result" class="result-box hidden"></div>
+      </div>
+    </section>
+
+    <!-- History Tab -->
+    <section id="tab-history" class="tab-panel">
+      <div class="card">
+        <h2>历史记录</h2>
+        <div id="history-list" class="history-list"><p class="empty">暂无记录</p></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="ftr">
+    <div class="ctr">Investment Research System &copy; 2026 | Adversarial Analysis Framework</div>
+  </footer>
+
+  <script src="/js/app.js"></script>
+  <script src="/js/dashboard.js"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.tmp/
+.claude/
+node_modules/
+*.db
+state/
+investment-app/data.db
+investment-app/reports/
+investment-app/package-lock.json
+daily_report.txt
+docs/daily_report.txt
+monitor.log
