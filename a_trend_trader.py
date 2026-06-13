@@ -46,7 +46,7 @@ def _ssl_ctx():
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
 
-def fetch_tencent_cn_kline(symbol, days=500):
+def fetch_tencent_cn_kline(symbol, days=1000):
     url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={symbol},day,,,{days},qfq"
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -79,13 +79,74 @@ def fetch_tencent_cn_kline(symbol, days=500):
     return bars
 
 
-def update_cn_ticker(conn, symbol, verbose=False):
+def symbol_to_tushare(symbol):
+    prefix = symbol[:2].upper()
+    code = symbol[2:]
+    return f"{code}.{prefix}"
+
+
+def _is_index_symbol(symbol):
+    return symbol.startswith("sh000") or symbol.startswith("sz399")
+
+
+def fetch_tushare_cn_kline(symbol, days=1000, token=""):
+    ts_code = symbol_to_tushare(symbol)
+    end_date = datetime.date.today().strftime("%Y%m%d")
+    start_date = (datetime.date.today() - datetime.timedelta(days=int(days * 1.5))).strftime("%Y%m%d")
+
+    api_name = "index_daily" if _is_index_symbol(symbol) else "fund_daily"
+
+    payload = json.dumps({
+        "api_name": api_name,
+        "token": token,
+        "params": {"ts_code": ts_code, "start_date": start_date, "end_date": end_date},
+        "fields": "ts_code,trade_date,open,high,low,close,vol",
+    }).encode()
+
+    req = urllib.request.Request("https://api.tushare.pro",
+        data=payload, headers={"Content-Type": "application/json"})
+    resp = urllib.request.urlopen(req, timeout=30)
+    result = json.loads(resp.read().decode("utf-8"))
+
+    if result.get("code") != 0:
+        raise Exception(result.get("msg", "Tushare API error"))
+
+    fields = result["data"]["fields"]
+    items = result["data"]["items"]
+    if not items:
+        return []
+
+    fi = {f: i for i, f in enumerate(fields)}
+
+    bars = []
+    for row in reversed(items):
+        td = str(row[fi["trade_date"]])
+        o = row[fi["open"]]
+        h = row[fi["high"]]
+        l = row[fi["low"]]
+        c = row[fi["close"]]
+        v = row[fi["vol"]]
+        if o is None or c is None:
+            continue
+        bars.append({
+            "date": f"{td[:4]}-{td[4:6]}-{td[6:8]}",
+            "open": float(o), "high": float(h), "low": float(l),
+            "close": float(c),
+            "volume": int(float(v) * 100) if v else 0,
+        })
+    return bars[-days:]
+
+
+def update_cn_ticker(conn, symbol, verbose=False, data_source="tencent", tushare_token=""):
     cursor = conn.execute(
         "SELECT MAX(date) FROM daily_bars WHERE ticker=?", (symbol,)
     )
     last_date = cursor.fetchone()[0]
 
-    bars = fetch_tencent_cn_kline(symbol, 500)
+    if data_source == "tushare" and tushare_token:
+        bars = fetch_tushare_cn_kline(symbol, 1000, tushare_token)
+    else:
+        bars = fetch_tencent_cn_kline(symbol, 1000)
     if not bars:
         if verbose:
             print(f"  {symbol}: 无数据")
