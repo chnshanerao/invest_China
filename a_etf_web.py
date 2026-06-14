@@ -58,6 +58,7 @@ def scan_all_data():
         bench_chg = (bench_bars[-1]["close"] - bench_bars[-2]["close"]) / bench_bars[-2]["close"] * 100
 
     results = []
+    fetch_errors = []
     for name, cfg in ETF_BASKET.items():
         sym = cfg["symbol"]
         cat = cfg.get("cat", "行业")
@@ -65,7 +66,8 @@ def scan_all_data():
 
         try:
             update_cn_ticker(conn, sym, verbose=False, data_source=ds, tushare_token=token)
-        except Exception:
+        except Exception as e:
+            fetch_errors.append(f"{name}({sym}): {e}")
             continue
 
         bars = get_bars(conn, sym, 750)
@@ -191,6 +193,7 @@ def scan_all_data():
         "tier_all": tier_all,
         "tier_partial": tier_partial,
         "tier_none": tier_none,
+        "fetch_errors": fetch_errors[:10],
         "results": results,
     }
 
@@ -206,6 +209,11 @@ def get_cached_data(force=False):
             return _cache["data"]
     print(f"[{now.strftime('%H:%M:%S')}] 扫描36个ETF...", flush=True)
     data = scan_all_data()
+    errs = data.get("fetch_errors", [])
+    print(f"[{now.strftime('%H:%M:%S')}] 扫描完成: {data['total']}个ETF, {len(errs)}个失败", flush=True)
+    if errs:
+        for e in errs[:5]:
+            print(f"  错误: {e}", flush=True)
     _cache["data"] = data
     _cache["time"] = now
     print(f"[{now.strftime('%H:%M:%S')}] 扫描完成", flush=True)
@@ -319,6 +327,7 @@ tr.filtered-row:hover td { opacity: 0.7; }
 .trend-all { background: #d5f5e3; color: #1e8449; }
 .trend-partial { background: #fdebd0; color: #b9770e; }
 .trend-none { background: #f2f3f4; color: #95a5a6; }
+.fetch-error-bar { display:none; margin:0 24px 8px; padding:10px 16px; background:#fff3cd; color:#856404; border-radius:8px; font-size:13px; }
 
 .holding-star { color: #f39c12; font-size: 12px; }
 
@@ -461,6 +470,7 @@ tr.filtered-row:hover td { opacity: 0.7; }
     <div class="tier-label">都不满足</div>
   </div>
 </div>
+<div class="fetch-error-bar" id="fetch-error-bar"></div>
 
 <hr class="step-divider">
 
@@ -754,21 +764,31 @@ async function loadData(force) {
   const loading = document.getElementById('loading');
   const table = document.getElementById('main-table');
   btn.disabled = true;
-  btn.textContent = '扫描中...';
+  btn.textContent = '扫描中(首次约30s)...';
   if (!DATA) { loading.style.display = 'block'; table.style.display = 'none'; }
   try {
     const url = force ? '/api/scan?force=1' : '/api/scan';
     const resp = await fetch(url);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
     DATA = await resp.json();
+    if (DATA.error) { alert('扫描出错: ' + DATA.error); return; }
     populateEtfSelect();
     renderAll();
+    if (DATA.fetch_errors && DATA.fetch_errors.length > 0) {
+      const errDiv = document.getElementById('fetch-error-bar');
+      errDiv.innerHTML = '<strong>' + DATA.fetch_errors.length + '个标的拉取失败:</strong> ' + DATA.fetch_errors.slice(0,3).join('; ') + (DATA.fetch_errors.length > 3 ? ' ...' : '');
+      errDiv.style.display = 'block';
+    } else {
+      document.getElementById('fetch-error-bar').style.display = 'none';
+    }
   } catch(e) {
-    alert('数据加载失败: ' + e.message);
+    document.getElementById('loading').innerHTML = '<p style="color:#e74c3c;font-size:14px">数据加载失败: ' + e.message + '</p><p style="margin-top:8px;color:#636e72;font-size:13px">请检查网络连接，确保可访问 web.ifzq.gtimg.cn</p><button class="btn" onclick="loadData(true)" style="margin-top:12px">重试</button>';
+    return;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '刷新数据';
+    if (DATA && DATA.results) { loading.style.display = 'none'; table.style.display = ''; }
   }
-  btn.disabled = false;
-  btn.textContent = '刷新数据';
-  loading.style.display = 'none';
-  table.style.display = '';
 }
 
 function refresh() { loadData(true); }
@@ -1375,9 +1395,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             try:
                 bars = fetch_tushare_cn_kline("sz159516", 5, token)
-                self._send_json({"ok": True, "msg": f"连接成功，获取{len(bars)}条数据"})
+                if bars:
+                    self._send_json({"ok": True, "msg": f"连接成功，获取{len(bars)}条数据"})
+                else:
+                    self._send_json({"ok": False, "msg": "连接成功但未返回数据，请检查Token权限(需要fund_daily接口)"})
             except Exception as e:
-                self._send_json({"ok": False, "msg": f"连接失败: {e}"})
+                err = str(e)
+                if "SSL" in err or "certificate" in err.lower():
+                    hint = "SSL证书错误 — 请尝试: pip install certifi"
+                elif "IP" in err and "超限" in err:
+                    hint = "Tushare IP限制 — 请升级积分或稍后重试"
+                elif "timed out" in err.lower() or "timeout" in err.lower():
+                    hint = "连接超时 — 请检查网络是否可访问 api.tushare.pro"
+                elif "权限" in err or "permission" in err.lower():
+                    hint = "Token无权限 — 请在tushare.pro确认已开通fund_daily接口"
+                else:
+                    hint = err
+                self._send_json({"ok": False, "msg": f"连接失败: {hint}"})
 
         elif self.path == "/api/strategy":
             try:

@@ -105,7 +105,8 @@ def fetch_tushare_cn_kline(symbol, days=1000, token=""):
 
     req = urllib.request.Request("https://api.tushare.pro",
         data=payload, headers={"Content-Type": "application/json"})
-    resp = urllib.request.urlopen(req, timeout=30)
+    ctx = _ssl_ctx()
+    resp = urllib.request.urlopen(req, context=ctx, timeout=30)
     result = json.loads(resp.read().decode("utf-8"))
 
     if result.get("code") != 0:
