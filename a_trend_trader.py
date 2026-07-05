@@ -158,7 +158,7 @@ def update_cn_ticker(conn, symbol, verbose=False, data_source="tencent", tushare
         if last_date and b["date"] <= last_date:
             continue
         conn.execute(
-            "INSERT OR REPLACE INTO daily_bars VALUES (?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO daily_bars (ticker,date,open,high,low,close,volume) VALUES (?,?,?,?,?,?,?)",
             (symbol, b["date"], b["open"], b["high"], b["low"], b["close"], b["volume"]),
         )
         new_count += 1
@@ -166,7 +166,7 @@ def update_cn_ticker(conn, symbol, verbose=False, data_source="tencent", tushare
     if new_count == 0 and not last_date:
         for b in bars:
             conn.execute(
-                "INSERT OR REPLACE INTO daily_bars VALUES (?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO daily_bars (ticker,date,open,high,low,close,volume) VALUES (?,?,?,?,?,?,?)",
                 (symbol, b["date"], b["open"], b["high"], b["low"], b["close"], b["volume"]),
             )
             new_count += 1
