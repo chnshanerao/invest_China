@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-A股ETF持仓监控系统
+A股持仓监控系统
 配合CloudCLI定时任务，盘前/收盘推送完整报告到钉钉
 
-持仓: 卫星ETF(159206), 红利ETF(515180)
+持仓: 生益科技/沪电股份/振华股份/国瓷材料/风华高科 + 电力ETF(少量)
+观察仓: 兆易创新/澜起科技/三环集团/昊华科技
 数据源: 新浪财经API (无需第三方依赖)
 """
 
@@ -20,79 +21,86 @@ import hashlib
 import base64
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
 
 # ============================================================
 # 配置区
 # ============================================================
 
 HOLDINGS = {
-    "卫星ETF": {
-        "sina_symbol": "sz159206",
-        "shares": 10,
-        "weight_current": 0.42,
-        "weight_target": 0.30,
-        "notes": "SpaceX IPO后反弹减仓",
-    },
-    "半导体设备": {
-        "sina_symbol": "sz159516",
-        "shares": 3,
-        "weight_current": 0.22,
+    "生益科技": {
+        "sina_symbol": "sh600183",
+        "shares": 1,
+        "weight_current": 0.25,
         "weight_target": 0.25,
-        "notes": "国产替代+存储扩产,PE高位注意波动",
+        "notes": "PCB覆铜板龙头,AI算力基础设施",
     },
-    "红利ETF": {
-        "sina_symbol": "sh515180",
-        "shares": 2.7,
-        "weight_current": 0.15,
-        "weight_target": 0.20,
-        "notes": "压舱石,持有到10月吃分红",
+    "沪电股份": {
+        "sina_symbol": "sz002463",
+        "shares": 1,
+        "weight_current": 0.25,
+        "weight_target": 0.25,
+        "notes": "高端PCB,服务器/汽车板",
+    },
+    "国瓷材料": {
+        "sina_symbol": "sz300285",
+        "shares": 1,
+        "weight_current": 0.25,
+        "weight_target": 0.25,
+        "notes": "MLCC陶瓷粉体+蜂窝陶瓷,被动元器件上游",
+    },
+    "兆易创新": {
+        "sina_symbol": "sh603986",
+        "shares": 1,
+        "weight_current": 0.25,
+        "weight_target": 0.25,
+        "notes": "存储+MCU双轮驱动,AI边缘端",
+    },
+}
+
+WATCHLIST = {
+    "澜起科技": {
+        "sina_symbol": "sh688008",
+        "notes": "内存接口芯片龙头,DDR5周期",
+    },
+    "三环集团": {
+        "sina_symbol": "sz300408",
+        "notes": "MLCC+光纤陶瓷插芯,被动元器件",
+    },
+    "昊华科技": {
+        "sina_symbol": "sh600378",
+        "notes": "氟化工+电子特气,半导体材料",
     },
     "振华股份": {
         "sina_symbol": "sh603067",
-        "shares": 1.5,
-        "weight_current": 0.13,
-        "weight_target": 0.15,
         "notes": "铬盐龙头,有色金属周期",
-    },
-    "电力ETF": {
-        "sina_symbol": "sz159611",
-        "shares": 0.7,
-        "weight_current": 0.04,
-        "weight_target": 0.10,
-        "notes": "电力改革+AI算力用电,新开仓",
     },
 }
 
 PRICE_TARGETS = {
-    "sz159206": {
-        "name": "卫星ETF",
-        "sell_low": 1.65, "sell_high": 1.70,
-        "stop_loss": 1.37,
-        "buy_low": None, "buy_high": None,
-    },
-    "sz159516": {
-        "name": "半导体设备",
-        "sell_low": None, "sell_high": None,
-        "stop_loss": 1.10,
-        "buy_low": None, "buy_high": None,
-    },
-    "sh515180": {
-        "name": "红利ETF",
+    "sh600183": {
+        "name": "生益科技",
         "sell_low": None, "sell_high": None,
         "stop_loss": None,
-        "buy_low": None, "buy_high": 1.40,
-    },
-    "sh603067": {
-        "name": "振华股份",
-        "sell_low": None, "sell_high": None,
-        "stop_loss": 27.00,
         "buy_low": None, "buy_high": None,
     },
-    "sz159611": {
-        "name": "电力ETF",
+    "sz002463": {
+        "name": "沪电股份",
         "sell_low": None, "sell_high": None,
         "stop_loss": None,
-        "buy_low": 1.00, "buy_high": 1.05,
+        "buy_low": None, "buy_high": None,
+    },
+    "sz300285": {
+        "name": "国瓷材料",
+        "sell_low": None, "sell_high": None,
+        "stop_loss": None,
+        "buy_low": None, "buy_high": None,
+    },
+    "sh603986": {
+        "name": "兆易创新",
+        "sell_low": None, "sell_high": None,
+        "stop_loss": None,
+        "buy_low": None, "buy_high": None,
     },
 }
 
@@ -102,14 +110,11 @@ MARKET_INDICES = {
 }
 
 KEY_EVENTS = [
-    {"date": "2026-06-12", "event": "SpaceX IPO(纳斯达克)", "action": "卫星ETF反弹减仓催化"},
-    {"date": "2026-06-15", "event": "5月经济数据(CPI/PPI/社融)", "action": "观察通胀和流动性"},
-    {"date": "2026-06-20", "event": "LPR报价", "action": "关注是否降息"},
-    {"date": "2026-07-01", "event": "财新PMI", "action": "经济景气验证"},
+    {"date": "2026-07-01", "event": "财新PMI", "action": "经济景气验证,关注制造业PMI"},
+    {"date": "2026-07-15", "event": "Q2 GDP + 6月经济数据", "action": "验证PCB/被动元器件景气度"},
     {"date": "2026-07-25", "event": "7月政治局会议(预估)", "action": "下半年政策定调"},
-    {"date": "2026-08-31", "event": "中报披露截止", "action": "验证半导体设备/振华股份业绩"},
+    {"date": "2026-08-31", "event": "中报披露截止", "action": "验证生益/沪电/振华/国瓷/风华业绩"},
     {"date": "2026-09-15", "event": "8月经济数据", "action": "Q3景气验证"},
-    {"date": "2026-10-20", "event": "红利ETF分红(预估)", "action": "持有吃分红,10月权益登记"},
     {"date": "2026-10-31", "event": "三季报披露截止", "action": "全面业绩验证"},
     {"date": "2026-11-15", "event": "10月经济数据", "action": "评估组合,决定是否调整"},
 ]
@@ -187,6 +192,11 @@ def fetch_all_quotes():
         all_symbols.append(sym)
         symbol_map[sym] = label
 
+    for label, cfg in WATCHLIST.items():
+        sym = cfg["sina_symbol"]
+        all_symbols.append(sym)
+        symbol_map[sym] = label
+
     for label, sym in MARKET_INDICES.items():
         all_symbols.append(sym)
         symbol_map[sym] = label
@@ -203,9 +213,13 @@ def fetch_all_quotes():
         data = resp.read().decode("gbk", errors="replace")
     except Exception as e:
         print(f"[ERROR] 数据获取失败: {e}")
-        return {}, {}
+        return {}, {}, {}
+
+    holding_syms = {cfg["sina_symbol"] for cfg in HOLDINGS.values()}
+    watch_syms = {cfg["sina_symbol"] for cfg in WATCHLIST.values()}
 
     holdings_data = {}
+    watchlist_data = {}
     index_data = {}
 
     for line in data.strip().split("\n"):
@@ -217,12 +231,14 @@ def fetch_all_quotes():
             continue
         sym = parsed["symbol"]
         label = symbol_map.get(sym, sym)
-        if sym in [cfg["sina_symbol"] for cfg in HOLDINGS.values()]:
+        if sym in holding_syms:
             holdings_data[label] = parsed
+        elif sym in watch_syms:
+            watchlist_data[label] = parsed
         else:
             index_data[label] = parsed
 
-    return holdings_data, index_data
+    return holdings_data, index_data, watchlist_data
 
 
 # ============================================================
@@ -373,7 +389,46 @@ def format_price_distance(price, target, direction="above"):
     return f"{pct:+.1f}%"
 
 
-def generate_report(holdings_data, index_data, signals, events, tracker):
+def fetch_etf_signals():
+    """扫描ETF信号，返回精简摘要"""
+    try:
+        from a_etf_trend import (
+            ETF_BASKET, classify_signal, get_etf_config,
+            load_strategy_config, load_etf_settings,
+        )
+        from a_trend_trader import update_cn_ticker
+        from chokepoint_trader import init_db as init_bar_db, get_bars
+
+        conn = init_bar_db()
+        settings = load_etf_settings()
+        ds = settings.get("data_source", "tencent")
+        token = settings.get("tushare_token", "")
+        strat_config = load_strategy_config()
+
+        signals = {"breakout": [], "pullback": [], "strong": [], "overbought": []}
+        for name, cfg in ETF_BASKET.items():
+            sym = cfg["symbol"]
+            try:
+                update_cn_ticker(conn, sym, verbose=False, data_source=ds, tushare_token=token)
+            except Exception:
+                continue
+            bars = get_bars(conn, sym, 750)
+            if len(bars) < 60:
+                continue
+            etf_config = get_etf_config(sym, strat_config)
+            sig = classify_signal(bars, config=etf_config)
+            st = sig["signal_type"]
+            if st in signals:
+                chg = (bars[-1]["close"] - bars[-2]["close"]) / bars[-2]["close"] * 100 if len(bars) >= 2 else 0
+                signals[st].append({"name": name, "label": sig["label"], "chg": chg,
+                                     "monthly": sig["monthly_pass"], "weekly": sig["weekly_pass"]})
+        conn.close()
+        return signals
+    except Exception:
+        return None
+
+
+def generate_report(holdings_data, index_data, signals, events, tracker, watchlist_data=None, etf_signals=None):
     now = datetime.datetime.now()
     lines = []
 
@@ -446,6 +501,39 @@ def generate_report(holdings_data, index_data, signals, events, tracker):
             f"{status}"
         )
     lines.append("")
+
+    if watchlist_data:
+        lines.append("**观察仓**:")
+        lines.append("")
+        for label, cfg in WATCHLIST.items():
+            d = watchlist_data.get(label)
+            if not d or not d.get("ok"):
+                lines.append(f"- {label}: 数据获取失败")
+                continue
+            price = d["price"]
+            chg = d["change_pct"]
+            icon_chg = "+" if chg >= 0 else ""
+            lines.append(f"- {label} {price:.2f}({icon_chg}{chg:.2f}%) -- {cfg['notes']}")
+        lines.append("")
+
+    if etf_signals:
+        has_any = any(etf_signals.get(k) for k in ("breakout", "pullback", "strong", "overbought"))
+        if has_any:
+            lines.append("**ETF信号**:")
+            lines.append("")
+            for key, label in [("breakout", "突破"), ("pullback", "回踩"), ("overbought", "超买"), ("strong", "强势")]:
+                items = etf_signals.get(key, [])
+                if items:
+                    tier_items = []
+                    for s in items:
+                        tier = "月+周" if (s["monthly"] and s["weekly"]) else ("部分" if (s["monthly"] or s["weekly"]) else "")
+                        tier_tag = f"[{tier}]" if tier else ""
+                        tier_items.append(f"{s['name']}{tier_tag}({s['chg']:+.1f}%)")
+                    lines.append(f"- {label}: {', '.join(tier_items)}")
+            lines.append("")
+        else:
+            lines.append("**ETF信号**: 无可操作信号")
+            lines.append("")
 
     if signals:
         lines.append("**操作信号**:")
@@ -528,7 +616,7 @@ def main():
     if not quiet:
         print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] A股持仓监控启动")
 
-    holdings_data, index_data = fetch_all_quotes()
+    holdings_data, index_data, watchlist_data = fetch_all_quotes()
 
     if not holdings_data:
         msg = f"[{now.strftime('%H:%M')}] A股数据获取失败(非交易时段或网络异常)"
@@ -542,7 +630,9 @@ def main():
     events = check_event_calendar()
     tracker = update_trend_tracker(index_data)
 
-    report = generate_report(holdings_data, index_data, signals, events, tracker)
+    etf_signals = fetch_etf_signals()
+
+    report = generate_report(holdings_data, index_data, signals, events, tracker, watchlist_data, etf_signals)
 
     if not quiet:
         print(report)
