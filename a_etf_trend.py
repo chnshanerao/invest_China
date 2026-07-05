@@ -44,7 +44,7 @@ from a_stock_monitor import send_dingtalk
 # ============================================================
 
 ETF_BASKET = {
-    # ---- 行业ETF (20) ----
+    # ---- 行业ETF (23) ----
     "通信":       {"symbol": "sh515880", "cat": "行业"},
     "半导体设备":  {"symbol": "sz159516", "cat": "行业", "holding": True},
     "芯片":       {"symbol": "sz159801", "cat": "行业"},
@@ -63,6 +63,9 @@ ETF_BASKET = {
     "医药":       {"symbol": "sh512010", "cat": "行业"},
     "房地产":      {"symbol": "sh512200", "cat": "行业"},
     "有色金属":    {"symbol": "sh512400", "cat": "行业"},
+    "黄金":       {"symbol": "sh518880", "cat": "行业"},
+    "黄金股":      {"symbol": "sz159322", "cat": "行业"},
+    "铜":         {"symbol": "sz159980", "cat": "行业"},
     "软件":       {"symbol": "sz159852", "cat": "行业"},
     "卫星":       {"symbol": "sz159206", "cat": "行业", "holding": True},
 
@@ -227,17 +230,35 @@ def is_trend_suitable(symbol):
 # 系统设置
 # ============================================================
 
+_DEFAULT_SETTINGS = {
+    "tushare_token": "", "data_source": "tencent", "fetch_schedule": "16:00",
+    "portfolio": {
+        "max_positions": 5, "total_capital": 500000,
+        "max_single_pct": 0.30, "breakout_pct": 0.20, "pullback_pct": 0.25,
+    },
+}
+
+
 def load_etf_settings():
     try:
         with open(SETTINGS_FILE, "r") as f:
-            return json.load(f)
+            saved = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"tushare_token": "", "data_source": "tencent", "fetch_schedule": "16:00"}
+        saved = {}
+    result = dict(_DEFAULT_SETTINGS)
+    result.update(saved)
+    if "portfolio" not in result or not isinstance(result["portfolio"], dict):
+        result["portfolio"] = dict(_DEFAULT_SETTINGS["portfolio"])
+    else:
+        merged = dict(_DEFAULT_SETTINGS["portfolio"])
+        merged.update(result["portfolio"])
+        result["portfolio"] = merged
+    return result
 
 
 def save_etf_settings(settings):
     os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
-    allowed = {"tushare_token", "data_source", "fetch_schedule"}
+    allowed = {"tushare_token", "data_source", "fetch_schedule", "portfolio"}
     clean = {k: v for k, v in settings.items() if k in allowed}
     with open(SETTINGS_FILE, "w") as f:
         json.dump(clean, f, ensure_ascii=False, indent=2)
@@ -769,10 +790,65 @@ def save_positions(data):
 # 回测引擎
 # ============================================================
 
+MAX_POSITIONS = 5
+MAX_SINGLE_PCT = 0.3
+DEFAULT_TOTAL_CAPITAL = 500000
+
+
+def portfolio_advice(results, settings=None):
+    if settings is None:
+        settings = {}
+    pc = settings.get("portfolio", {})
+    max_pos = pc.get("max_positions", MAX_POSITIONS)
+    max_single = pc.get("max_single_pct", MAX_SINGLE_PCT)
+    total_capital = pc.get("total_capital", DEFAULT_TOTAL_CAPITAL)
+    breakout_pct = pc.get("breakout_pct", 0.2)
+    pullback_pct = pc.get("pullback_pct", 0.25)
+
+    actionable = [r for r in results
+                  if r.get("tier") == "all"
+                  and r.get("signal_type") in (SIGNAL_BREAKOUT, SIGNAL_PULLBACK)]
+
+    actionable.sort(key=lambda r: (
+        1 if r["signal_type"] == SIGNAL_BREAKOUT else 0,
+        r.get("chg_5d", 0),
+    ), reverse=True)
+
+    selected = actionable[:max_pos]
+
+    advice = []
+    remaining = 1.0
+    for r in selected:
+        if r["signal_type"] == SIGNAL_BREAKOUT:
+            pct = breakout_pct
+        else:
+            pct = pullback_pct
+        pct = min(pct, max_single, remaining)
+        if pct <= 0:
+            break
+        remaining -= pct
+        advice.append({
+            "name": r["name"], "symbol": r["symbol"],
+            "signal": r.get("signal_label", ""),
+            "position_pct": round(pct, 2),
+            "amount": int(total_capital * pct),
+        })
+
+    return {
+        "max_positions": max_pos,
+        "current_signals": len(actionable),
+        "selected": len(advice),
+        "total_allocation_pct": round(sum(a["position_pct"] for a in advice), 2),
+        "advice": advice,
+    }
+
+
+# ============================================================
+
 class RightSideBacktest:
     def __init__(self, bars, benchmark_bars=None, capital=CAPITAL_PER_TRADE,
                  base_k=BASE_K, min_k=MIN_K, hard_stop_pct=HARD_STOP_PCT,
-                 config=None):
+                 config=None, commission_rate=0.0003, slippage_rate=0.001):
         self.bars = bars
         self.benchmark_bars = benchmark_bars
         self.init_capital = capital
@@ -787,7 +863,11 @@ class RightSideBacktest:
         self.max_dd = 0
         self.dd_peak_date = ""
         self.dd_trough_date = ""
+        self.total_commission = 0
+        self.total_slippage = 0
         self.config = config
+        self.commission_rate = commission_rate
+        self.slippage_rate = slippage_rate
         if config is not None:
             exc = config.get("exit", {})
             self.base_k = exc.get("base_k", base_k)
@@ -813,6 +893,10 @@ class RightSideBacktest:
                     config=self.config
                 )
                 if should_exit:
+                    sell_cost = self.position * price * (self.commission_rate + self.slippage_rate)
+                    self.total_commission += self.position * price * self.commission_rate
+                    self.total_slippage += self.position * price * self.slippage_rate
+                    proceeds = self.position * price - sell_cost
                     pnl_pct = (price - self.entry_price) / self.entry_price * 100
                     hold = self._days(self.entry_date, bar["date"])
                     self.trades.append({
@@ -826,7 +910,7 @@ class RightSideBacktest:
                         "exit_reason": reason,
                         "exit_K": k,
                     })
-                    self.capital += self.position * price
+                    self.capital += proceeds
                     self.position = 0
                     self.entry_price = 0
                     self.highest_close = 0
@@ -834,9 +918,14 @@ class RightSideBacktest:
             if self.position == 0:
                 entry, details, extras = check_entry(window, config=self.config)
                 if entry:
-                    shares = int(self.capital / price)
+                    buy_price_adj = price * (1 + self.slippage_rate)
+                    shares = int(self.capital / (buy_price_adj * (1 + self.commission_rate)))
                     if shares > 0:
-                        self.capital -= shares * price
+                        buy_cost = shares * buy_price_adj
+                        commission = buy_cost * self.commission_rate
+                        self.total_commission += commission
+                        self.total_slippage += shares * price * self.slippage_rate
+                        self.capital -= (buy_cost + commission)
                         self.position = shares
                         self.entry_price = price
                         self.entry_date = bar["date"]
@@ -928,6 +1017,9 @@ class RightSideBacktest:
             print(f"  盈亏比:   {abs(avg_w / avg_l):.2f} | PF: {pf:.2f}")
         print(f"  持仓:     均{avg_hold:.0f}天")
         print(f"  净值:     {final:.0f} (初始{self.init_capital})")
+        total_cost = self.total_commission + self.total_slippage
+        if total_cost > 0:
+            print(f"  交易成本: ¥{total_cost:.0f} (佣金¥{self.total_commission:.0f} + 滑点¥{self.total_slippage:.0f})")
 
         if self.trades:
             print(f"\n  {'入场':>10s}  {'出场':>10s}  {'入价':>7s}  {'出价':>7s} {'收益':>7s} {'天':>3s}  {'K':>3s}  原因")
@@ -944,10 +1036,152 @@ class RightSideBacktest:
             "trades": len(self.trades), "win_rate": wr,
             "profit_factor": pf, "avg_hold": avg_hold,
             "bench_return": bench_ret,
+            "total_cost": self.total_commission + self.total_slippage,
+            "commission": self.total_commission,
+            "slippage": self.total_slippage,
         }
 
 
-# ============================================================
+def calc_extended_metrics(bt):
+    """计算扩展风险指标：Sortino、Calmar、PF、暴露时间、月度收益等"""
+    if not bt.equity_curve or len(bt.equity_curve) < 2:
+        return {}
+
+    eq = bt.equity_curve
+    n_days = len(eq)
+    final = eq[-1]["equity"]
+    total_ret = (final / bt.init_capital - 1) * 100
+    years = n_days / 244
+    ann_ret = ((final / bt.init_capital) ** (1 / years) - 1) * 100 if years > 0.1 else total_ret
+
+    daily_rf = 0.02 / 244
+    rets = [(eq[j]["equity"] - eq[j-1]["equity"]) / eq[j-1]["equity"]
+            for j in range(1, len(eq)) if eq[j-1]["equity"] > 0]
+    excess = [r - daily_rf for r in rets]
+
+    avg_ex = sum(excess) / len(excess) if excess else 0
+    std_ex = math.sqrt(sum((r - avg_ex)**2 for r in excess) / len(excess)) if len(excess) > 1 else 1
+    sharpe_adj = (avg_ex / std_ex) * math.sqrt(244) if std_ex > 0 else 0
+
+    downside = [r for r in excess if r < 0]
+    down_dev = math.sqrt(sum(r**2 for r in downside) / len(excess)) if excess else 1
+    sortino = (avg_ex / down_dev) * math.sqrt(244) if down_dev > 0 else 0
+
+    max_dd_pct = bt.max_dd * 100
+    calmar = ann_ret / max_dd_pct if max_dd_pct > 0 else 0
+
+    wins = [t for t in bt.trades if t.get("pnl", t.get("pnl_pct", 0)) > 0]
+    losses = [t for t in bt.trades if t.get("pnl", t.get("pnl_pct", 0)) <= 0]
+    win_pnl = sum(abs(t.get("pnl", t["pnl_pct"])) for t in wins)
+    loss_pnl = sum(abs(t.get("pnl", t["pnl_pct"])) for t in losses)
+    profit_factor = win_pnl / loss_pnl if loss_pnl > 0 else float("inf")
+
+    max_consec = 0
+    cur = 0
+    for t in bt.trades:
+        if t.get("pnl_pct", 0) <= 0:
+            cur += 1
+            max_consec = max(max_consec, cur)
+        else:
+            cur = 0
+
+    hold_total = sum(t.get("hold_days", 0) for t in bt.trades)
+    exposure_pct = (hold_total / n_days * 100) if n_days > 0 else 0
+
+    monthly = {}
+    for e in eq:
+        m = e["date"][:7]
+        if m not in monthly:
+            monthly[m] = {"first": e["equity"], "last": e["equity"]}
+        else:
+            monthly[m]["last"] = e["equity"]
+    monthly_returns = []
+    for m in sorted(monthly):
+        first, last = monthly[m]["first"], monthly[m]["last"]
+        ret = (last / first - 1) * 100 if first > 0 else 0
+        monthly_returns.append({"month": m, "ret": round(ret, 2)})
+
+    return {
+        "sharpe_adj": round(sharpe_adj, 2),
+        "sortino": round(sortino, 2),
+        "calmar": round(calmar, 2),
+        "profit_factor": round(profit_factor, 2) if profit_factor != float("inf") else 999,
+        "max_consec_loss": max_consec,
+        "exposure_pct": round(exposure_pct, 1),
+        "monthly_returns": monthly_returns,
+    }
+
+
+def strategy_health_check(scan_results, bench_chg=0, config=None):
+    """策略健康检查 — 反面声音系统"""
+    warnings = []
+
+    down_count = sum(1 for r in scan_results if r.get("chg_1d", 0) < 0)
+    if bench_chg < -1 and down_count > len(scan_results) * 0.6:
+        warnings.append({
+            "category": "regime", "severity": "danger",
+            "title": "市场环境恶化",
+            "detail": f"基准下跌{bench_chg:.1f}%，{down_count}/{len(scan_results)}个标的下跌。趋势策略在熊市中表现不佳，建议减仓观望。",
+        })
+
+    actionable = [r for r in scan_results
+                  if r.get("signal_type") in (SIGNAL_BREAKOUT, SIGNAL_PULLBACK)
+                  and r.get("tier") == "all"]
+    if actionable:
+        cats = {}
+        for r in actionable:
+            c = r.get("cat", "未知")
+            cats[c] = cats.get(c, 0) + 1
+        top_cat = max(cats, key=cats.get)
+        if cats[top_cat] / len(actionable) >= 0.6 and len(actionable) >= 3:
+            warnings.append({
+                "category": "concentration", "severity": "warning",
+                "title": "信号行业集中",
+                "detail": f"{len(actionable)}个可操作信号中{cats[top_cat]}个来自「{top_cat}」，相关性风险高。建议分散行业配置。",
+            })
+
+    try:
+        opt_results = load_optimize_results()
+        if opt_results and opt_results[0].get("overfit_warning"):
+            warnings.append({
+                "category": "overfitting", "severity": "danger",
+                "title": "过拟合风险",
+                "detail": "最近一次参数优化的测试集收益远低于训练集。当前参数可能过度拟合历史数据，建议进行Walk-Forward验证。",
+            })
+    except Exception:
+        pass
+
+    try:
+        cal = load_calibration()
+        if cal:
+            neg = sum(1 for v in cal.values() if v.get("total_return", 0) < 0)
+            if len(cal) >= 5 and neg / len(cal) > 0.6:
+                warnings.append({
+                    "category": "degradation", "severity": "warning",
+                    "title": "策略整体退化",
+                    "detail": f"校准数据中{neg}/{len(cal)}个标的回测收益为负，当前参数可能不适合近期市场。",
+                })
+    except Exception:
+        pass
+
+    holding_overbought = [r for r in scan_results
+                          if r.get("holding") and (r.get("rsi", 0) or 0) > 70]
+    if len(holding_overbought) >= 2:
+        names = "、".join(r["name"] for r in holding_overbought[:3])
+        warnings.append({
+            "category": "overbought", "severity": "warning",
+            "title": "持仓集中超买",
+            "detail": f"{names}等{len(holding_overbought)}个持仓标的RSI>70，短期回调风险较高。",
+        })
+
+    if len(scan_results) > 0 and not actionable:
+        warnings.append({
+            "category": "drought", "severity": "info",
+            "title": "信号枯竭",
+            "detail": "当前无可操作的突破或回踩信号。耐心等待是右侧交易的核心纪律，请勿降低入场标准。",
+        })
+
+    return warnings
 # CLI: signal
 # ============================================================
 
@@ -1325,7 +1559,7 @@ def cmd_daily(push_dingtalk=False):
 # CLI: backtest / backtest-all
 # ============================================================
 
-def cmd_backtest(symbol, days=500):
+def cmd_backtest(symbol, days=1000):
     conn = init_db()
     _s = load_etf_settings()
     _ds, _tk = _s.get("data_source", "tencent"), _s.get("tushare_token", "")
@@ -1349,7 +1583,7 @@ def cmd_backtest(symbol, days=500):
     return bt.report(label)
 
 
-def cmd_backtest_all(days=500):
+def cmd_backtest_all(days=1000):
     conn = init_db()
     _s = load_etf_settings()
     _ds, _tk = _s.get("data_source", "tencent"), _s.get("tushare_token", "")
@@ -1423,7 +1657,7 @@ def cmd_backtest_all(days=500):
     return results
 
 
-def cmd_calibrate(days=500):
+def cmd_calibrate(days=1000):
     print("=== 趋势适配度校准 ===\n")
     results = cmd_backtest_all(days)
     if not results:
@@ -1741,8 +1975,217 @@ def cmd_param_test(symbol, days=1000):
 
 
 # ============================================================
-# ETF份额数据 — 资金流入/流出信号
+# Web API: 参数敏感性 / 市场环境 / Walk-Forward
 # ============================================================
+
+def run_param_sensitivity(symbol, config=None, days=1000):
+    """参数敏感性分析 — 返回JSON"""
+    conn = init_db()
+    _s = load_etf_settings()
+    _ds, _tk = _s.get("data_source", "tencent"), _s.get("tushare_token", "")
+    update_cn_ticker(conn, symbol, verbose=False, data_source=_ds, tushare_token=_tk)
+    update_cn_ticker(conn, BENCHMARK, verbose=False, data_source=_ds, tushare_token=_tk)
+    bars = get_bars(conn, symbol, days + 100)
+    bench = get_bars(conn, BENCHMARK, days + 100)
+    conn.close()
+
+    if len(bars) < 80:
+        return {"error": f"数据不足({len(bars)}条)"}
+
+    ec = config.get("exit", {}) if config else {}
+    cur_bk = ec.get("base_k", BASE_K)
+    cur_mk = ec.get("min_k", MIN_K)
+    cur_hs = ec.get("hard_stop_pct", HARD_STOP_PCT)
+
+    param_sets = [
+        (cur_bk, cur_mk, cur_hs, "当前参数", True),
+        (cur_bk - 0.5, cur_mk, cur_hs, f"K松 {cur_bk-0.5:.1f}", False),
+        (cur_bk + 0.5, cur_mk, cur_hs, f"K紧 {cur_bk+0.5:.1f}", False),
+        (cur_bk, max(0.5, cur_mk - 0.3), cur_hs, f"MinK松 {max(0.5,cur_mk-0.3):.1f}", False),
+        (cur_bk, cur_mk + 0.3, cur_hs, f"MinK紧 {cur_mk+0.3:.1f}", False),
+        (cur_bk, cur_mk, max(0.04, cur_hs - 0.02), f"止损松 {max(4,int((cur_hs-0.02)*100))}%", False),
+        (cur_bk, cur_mk, min(0.15, cur_hs + 0.02), f"止损紧 {min(15,int((cur_hs+0.02)*100))}%", False),
+        (cur_bk - 0.5, max(0.5, cur_mk - 0.2), max(0.04, cur_hs - 0.02), "组合松", False),
+        (cur_bk + 0.5, cur_mk + 0.2, min(0.15, cur_hs + 0.02), "组合紧", False),
+    ]
+    param_sets = [(bk, mk, hs, lab, cur) for bk, mk, hs, lab, cur in param_sets if mk < bk]
+
+    results = []
+    for base_k, min_k, hard_stop, label, is_current in param_sets:
+        bt = RightSideBacktest(bars, bench, base_k=base_k, min_k=min_k, hard_stop_pct=hard_stop)
+        bt.run()
+        if not bt.equity_curve:
+            continue
+        final = bt.equity_curve[-1]["equity"]
+        ret = (final - bt.init_capital) / bt.init_capital * 100
+        wins = [t for t in bt.trades if t["pnl_pct"] > 0]
+        wr = len(wins) / len(bt.trades) * 100 if bt.trades else 0
+        dr = [(bt.equity_curve[j]["equity"] - bt.equity_curve[j-1]["equity"]) / bt.equity_curve[j-1]["equity"]
+              for j in range(1, len(bt.equity_curve)) if bt.equity_curve[j-1]["equity"] > 0]
+        avg_dr = sum(dr) / len(dr) if dr else 0
+        std_dr = math.sqrt(sum((r - avg_dr)**2 for r in dr) / len(dr)) if len(dr) > 1 else 1
+        sharpe = (avg_dr / std_dr) * math.sqrt(244) if std_dr > 0 else 0
+        results.append({
+            "label": label,
+            "params": {"base_k": base_k, "min_k": min_k, "hard_stop_pct": hard_stop},
+            "total_return": round(ret, 1),
+            "max_drawdown": round(bt.max_dd * 100, 1),
+            "trades": len(bt.trades),
+            "win_rate": round(wr, 1),
+            "sharpe": round(sharpe, 2),
+            "is_current": is_current,
+        })
+
+    rets = [r["total_return"] for r in results]
+    spread = max(rets) - min(rets) if rets else 0
+    if spread < 15:
+        verdict = "stable"
+    elif spread < 40:
+        verdict = "sensitive"
+    else:
+        verdict = "highly_sensitive"
+
+    return {
+        "symbol": symbol, "name": _resolve_name(symbol),
+        "results": results, "spread": round(spread, 1), "verdict": verdict,
+    }
+
+
+def run_regime_analysis(symbol, config=None, days=1000):
+    """市场环境分析 — 返回JSON"""
+    conn = init_db()
+    _s = load_etf_settings()
+    _ds, _tk = _s.get("data_source", "tencent"), _s.get("tushare_token", "")
+    update_cn_ticker(conn, symbol, verbose=False, data_source=_ds, tushare_token=_tk)
+    update_cn_ticker(conn, BENCHMARK, verbose=False, data_source=_ds, tushare_token=_tk)
+    bars = get_bars(conn, symbol, days + 100)
+    bench = get_bars(conn, BENCHMARK, days + 100)
+    conn.close()
+
+    if len(bars) < 80:
+        return {"error": f"数据不足({len(bars)}条)"}
+
+    bt = RightSideBacktest(bars, bench, config=config)
+    bt.run()
+
+    phases = []
+    type_agg = {"bull": [], "bear": [], "sideways": []}
+    for pname, start, end, ptype in MARKET_PHASES:
+        bench_ret = _calc_bench_phase_return(bench, start, end)
+        trades = [t for t in bt.trades if _phase_for_date(t["entry_date"])[0] == pname]
+        wins = [t for t in trades if t["pnl_pct"] > 0]
+        wr = len(wins) / len(trades) * 100 if trades else 0
+        avg_pnl = sum(t["pnl_pct"] for t in trades) / len(trades) if trades else 0
+        total_pnl = sum(t["pnl_pct"] for t in trades)
+        phases.append({
+            "name": pname, "type": ptype, "start": start, "end": end,
+            "bench_return": round(bench_ret, 1),
+            "trades": len(trades), "win_rate": round(wr, 1),
+            "avg_pnl": round(avg_pnl, 1), "total_pnl": round(total_pnl, 1),
+        })
+        type_agg[ptype].extend(trades)
+
+    summary = {}
+    for ptype, label_cn in [("bull", "牛市"), ("bear", "熊市"), ("sideways", "震荡")]:
+        trades = type_agg[ptype]
+        wins = [t for t in trades if t["pnl_pct"] > 0]
+        summary[ptype] = {
+            "label": label_cn,
+            "trades": len(trades),
+            "win_rate": round(len(wins) / len(trades) * 100, 1) if trades else 0,
+            "avg_pnl": round(sum(t["pnl_pct"] for t in trades) / len(trades), 1) if trades else 0,
+        }
+
+    return {
+        "symbol": symbol, "name": _resolve_name(symbol),
+        "phases": phases, "summary": summary,
+    }
+
+
+def run_walk_forward(symbol, days=1000, train_window=500, test_window=125, step=125):
+    """Walk-Forward验证 — 滚动窗口优化+测试"""
+    conn = init_db()
+    _s = load_etf_settings()
+    _ds, _tk = _s.get("data_source", "tencent"), _s.get("tushare_token", "")
+    update_cn_ticker(conn, symbol, verbose=False, data_source=_ds, tushare_token=_tk)
+    update_cn_ticker(conn, BENCHMARK, verbose=False, data_source=_ds, tushare_token=_tk)
+    bars = get_bars(conn, symbol, days + 100)
+    bench = get_bars(conn, BENCHMARK, days + 100)
+    conn.close()
+
+    if len(bars) < train_window + test_window + 60:
+        return {"error": f"数据不足，需要至少{train_window + test_window + 60}条"}
+
+    wf_grid_bk = [2.0, 2.5, 3.0, 3.5]
+    wf_grid_mk = [0.8, 1.0, 1.2, 1.5]
+
+    windows = []
+    prev_best = None
+    param_changes = 0
+    i = 0
+    while i + train_window + test_window <= len(bars):
+        train_bars = bars[i:i + train_window]
+        test_bars = bars[i + train_window:i + train_window + test_window]
+        train_bench = [b for b in bench if train_bars[0]["date"] <= b["date"] <= train_bars[-1]["date"]]
+        test_bench = [b for b in bench if test_bars[0]["date"] <= b["date"] <= test_bars[-1]["date"]]
+
+        best_score = -999
+        best_params = None
+        for bk in wf_grid_bk:
+            for mk in wf_grid_mk:
+                if mk >= bk:
+                    continue
+                bt = RightSideBacktest(train_bars, train_bench, base_k=bk, min_k=mk)
+                bt.run()
+                if not bt.equity_curve:
+                    continue
+                ret = (bt.equity_curve[-1]["equity"] / bt.init_capital - 1) * 100
+                wr = len([t for t in bt.trades if t["pnl_pct"] > 0]) / len(bt.trades) * 100 if bt.trades else 0
+                score = _opt_score(ret, bt.max_dd * 100, wr, len(bt.trades))
+                if score > best_score:
+                    best_score = score
+                    best_params = {"base_k": bk, "min_k": mk}
+
+        if best_params is None:
+            best_params = {"base_k": 3.0, "min_k": 1.2}
+
+        bt_test = RightSideBacktest(test_bars, test_bench,
+                                     base_k=best_params["base_k"], min_k=best_params["min_k"])
+        bt_test.run()
+        oos_ret = (bt_test.equity_curve[-1]["equity"] / bt_test.init_capital - 1) * 100 if bt_test.equity_curve else 0
+
+        if prev_best and (prev_best["base_k"] != best_params["base_k"] or
+                          prev_best["min_k"] != best_params["min_k"]):
+            param_changes += 1
+        prev_best = best_params
+
+        windows.append({
+            "train_period": f"{train_bars[0]['date']}~{train_bars[-1]['date']}",
+            "test_period": f"{test_bars[0]['date']}~{test_bars[-1]['date']}",
+            "best_params": best_params,
+            "oos_return": round(oos_ret, 1),
+            "oos_trades": len(bt_test.trades),
+            "oos_max_dd": round(bt_test.max_dd * 100, 1),
+        })
+        i += step
+
+    if not windows:
+        return {"error": "无法构建足够的滚动窗口"}
+
+    profitable = sum(1 for w in windows if w["oos_return"] > 0)
+    avg_oos = sum(w["oos_return"] for w in windows) / len(windows)
+    consistency = profitable / len(windows) * 100
+    stability = (1 - param_changes / max(len(windows) - 1, 1)) * 100 if len(windows) > 1 else 100
+
+    return {
+        "symbol": symbol, "name": _resolve_name(symbol),
+        "windows": windows,
+        "avg_oos_return": round(avg_oos, 1),
+        "consistency_pct": round(consistency, 1),
+        "param_stability": round(stability, 1),
+        "total_windows": len(windows),
+        "profitable_windows": profitable,
+    }
 
 SHARE_DB_PATH = os.path.join(SCRIPT_DIR, "state", "etf_shares.db")
 
@@ -2073,7 +2516,27 @@ def run_backtest_with_config(symbol, config=None, days=500):
             "exit_reason": t["exit_reason"],
         })
 
-    return {
+    ext = calc_extended_metrics(bt)
+
+    step = max(1, len(bt.equity_curve) // 250)
+    eq_sampled = [{"d": e["date"], "v": round(e["equity"])}
+                  for i, e in enumerate(bt.equity_curve)
+                  if i % step == 0 or i == len(bt.equity_curve) - 1]
+
+    bench_curve = []
+    if bench and bt.equity_curve:
+        eq_start = bt.equity_curve[0]["date"]
+        eq_end = bt.equity_curve[-1]["date"]
+        aligned = [b for b in bench if eq_start <= b["date"] <= eq_end]
+        if aligned:
+            b0 = aligned[0]["close"]
+            if b0 > 0:
+                b_step = max(1, len(aligned) // 250)
+                bench_curve = [{"d": b["date"], "v": round(bt.init_capital * b["close"] / b0)}
+                               for i, b in enumerate(aligned)
+                               if i % b_step == 0 or i == len(aligned) - 1]
+
+    result = {
         "symbol": symbol, "name": _resolve_name(symbol), "days": days,
         "total_return": round(total_ret, 1), "annual_return": round(ann_ret, 1),
         "max_drawdown": round(bt.max_dd * 100, 1), "sharpe": round(sharpe, 2),
@@ -2081,7 +2544,14 @@ def run_backtest_with_config(symbol, config=None, days=500):
         "avg_win": round(avg_win, 1), "avg_loss": round(avg_loss, 1),
         "bench_return": round(bench_ret, 1),
         "trade_list": trade_list,
+        "total_cost": round(bt.total_commission + bt.total_slippage, 0),
+        "commission": round(bt.total_commission, 0),
+        "slippage": round(bt.total_slippage, 0),
+        "equity_curve": eq_sampled,
+        "bench_curve": bench_curve,
     }
+    result.update(ext)
+    return result
 
 
 OPTIMIZE_GRID = {
@@ -2119,16 +2589,24 @@ def run_optimization(scope="global", days=1000):
         except Exception:
             pass
 
+    train_bars = {}
+    test_bars = {}
     all_bars = {}
     bench = get_bars(conn, BENCHMARK, days + 100)
     for _, sym in symbols:
         b = get_bars(conn, sym, days + 100)
         if len(b) >= 80:
             all_bars[sym] = b
+            split = int(len(b) * 0.7)
+            train_bars[sym] = b[:split]
+            test_bars[sym] = b[split:]
     conn.close()
 
-    if not all_bars:
+    if not train_bars:
         return {"error": "无有效数据"}
+
+    bench_split = int(len(bench) * 0.7)
+    bench_train = bench[:bench_split]
 
     combos = []
     for ma in OPTIMIZE_GRID["ma_period"]:
@@ -2147,8 +2625,10 @@ def run_optimization(scope="global", days=1000):
                      "hard_stop_pct": combo["hard_stop_pct"]},
         })
         agg_ret, agg_dd, agg_wr, agg_trades = [], [], [], 0
-        for sym, bars in all_bars.items():
-            bt = RightSideBacktest(bars, bench, config=cfg)
+        for sym, bars in train_bars.items():
+            if len(bars) < 80:
+                continue
+            bt = RightSideBacktest(bars, bench_train, config=cfg)
             bt.run()
             if not bt.equity_curve:
                 continue
@@ -2180,6 +2660,29 @@ def run_optimization(scope="global", days=1000):
     results.sort(key=lambda x: x["score"], reverse=True)
     top20 = results[:20]
 
+    train_return = top20[0]["avg_return"] if top20 else 0
+    test_return = 0
+    overfit_warning = False
+    if top20:
+        best_cfg = _deep_merge(DEFAULT_STRATEGY, {
+            "entry": {"ma_period": top20[0]["params"]["ma_period"]},
+            "exit": {"base_k": top20[0]["params"]["base_k"],
+                     "min_k": top20[0]["params"]["min_k"],
+                     "hard_stop_pct": top20[0]["params"]["hard_stop_pct"]},
+        })
+        test_rets = []
+        for sym, bars in test_bars.items():
+            if len(bars) < 30:
+                continue
+            bt = RightSideBacktest(bars, bench[bench_split:], config=best_cfg)
+            bt.run()
+            if bt.equity_curve:
+                test_rets.append((bt.equity_curve[-1]["equity"] / bt.init_capital - 1) * 100)
+        if test_rets:
+            test_return = sum(test_rets) / len(test_rets)
+        if train_return > 0 and test_return < train_return * 0.3:
+            overfit_warning = True
+
     output = {
         "scope": scope,
         "days": days,
@@ -2188,6 +2691,9 @@ def run_optimization(scope="global", days=1000):
         "valid": len(results),
         "best": top20[0] if top20 else None,
         "rankings": top20,
+        "train_return": round(train_return, 1),
+        "test_return": round(test_return, 1),
+        "overfit_warning": overfit_warning,
     }
 
     _save_optimize_results(output)
@@ -2241,7 +2747,10 @@ def cmd_optimize(scope="global", days=1000):
         p = b["params"]
         print(f"最优参数:")
         print(f"  MA={p['ma_period']}  Base_K={p['base_k']}  Min_K={p['min_k']}  止损={p['hard_stop_pct']*100:.0f}%")
-        print(f"  评分={b['score']}  收益={b['avg_return']:+.1f}%  回撤={b['avg_drawdown']:.1f}%  胜率={b['avg_winrate']:.1f}%\n")
+        print(f"  评分={b['score']}  训练收益={result.get('train_return', 0):+.1f}%  测试收益={result.get('test_return', 0):+.1f}%")
+        if result.get("overfit_warning"):
+            print(f"  ⚠ 过拟合警告: 测试集收益远低于训练集，参数可能过度拟合历史数据")
+        print()
 
     print(f"{'排名':>4s}  {'MA':>3s}  {'K':>8s}  {'止损':>4s}  {'评分':>5s}  {'收益':>7s}  {'回撤':>5s}  {'胜率':>5s}  {'交易':>4s}")
     print(f"  {'-' * 60}")
@@ -2285,7 +2794,7 @@ def main():
         if len(args) < 2:
             print("用法: a_etf_trend.py backtest <symbol> [--days N]")
             return
-        d = 500
+        d = 1000
         if "--days" in args:
             idx = args.index("--days")
             if idx + 1 < len(args):
@@ -2293,7 +2802,7 @@ def main():
         cmd_backtest(args[1], d)
 
     elif cmd == "backtest-all":
-        d = 500
+        d = 1000
         if "--days" in args:
             idx = args.index("--days")
             if idx + 1 < len(args):
@@ -2301,7 +2810,7 @@ def main():
         cmd_backtest_all(d)
 
     elif cmd == "calibrate":
-        d = 500
+        d = 1000
         if "--days" in args:
             idx = args.index("--days")
             if idx + 1 < len(args):
