@@ -23,13 +23,14 @@ from a_etf_trend import (
     load_etf_settings, save_etf_settings,
     load_strategy_config, save_strategy_config, DEFAULT_STRATEGY,
     run_backtest_with_config, run_optimization, load_optimize_results,
-    classify_signal, get_etf_config,
+    classify_signal, get_etf_config, portfolio_advice, strategy_health_check,
+    run_param_sensitivity, run_regime_analysis, run_walk_forward,
     SIGNAL_BREAKOUT, SIGNAL_PULLBACK, SIGNAL_OVERBOUGHT, SIGNAL_STRONG, SIGNAL_WATCH,
     SIGNAL_LABELS, SIGNAL_COLORS,
 )
 from a_trend_trader import update_cn_ticker, fetch_tushare_cn_kline
 from chokepoint_trader import (
-    init_db, get_bars, sma, calc_rsi, calc_macd, calc_atr, calc_volume_ratio,
+    init_db, get_bars, sma, calc_rsi, calc_macd, calc_atr, calc_volume_ratio, calc_kdj,
 )
 
 
@@ -102,6 +103,7 @@ def scan_all_data():
         ma20v = sma(closes, 20)
         macd_l, macd_s, macd_h = calc_macd(closes)
         atr_vals = calc_atr(highs, lows, closes, 20)
+        k_line, d_line, j_line = calc_kdj(highs, lows, closes)
 
         c1 = ma20v[i] is not None and closes[i] > ma20v[i]
         c2 = False
@@ -174,6 +176,9 @@ def scan_all_data():
             "monthly_detail": sig["monthly_detail"],
             "weekly_detail": sig["weekly_detail"],
             "tier": tier,
+            "kdj_k": round(k_line[i], 1) if k_line[i] is not None else None,
+            "kdj_d": round(d_line[i], 1) if d_line[i] is not None else None,
+            "kdj_j": round(j_line[i], 1) if j_line[i] is not None else None,
         })
 
     conn.close()
@@ -193,6 +198,8 @@ def scan_all_data():
         "tier_all": tier_all,
         "tier_partial": tier_partial,
         "tier_none": tier_none,
+        "portfolio": portfolio_advice(results, settings),
+        "health_check": strategy_health_check(results, bench_chg=bench_chg),
         "fetch_errors": fetch_errors[:10],
         "results": results,
     }
@@ -329,6 +336,48 @@ tr.filtered-row:hover td { opacity: 0.7; }
 .trend-none { background: #f2f3f4; color: #95a5a6; }
 .fetch-error-bar { display:none; margin:0 24px 8px; padding:10px 16px; background:#fff3cd; color:#856404; border-radius:8px; font-size:13px; }
 
+.portfolio-card { display:none; margin:0 24px 8px; background:#fff; border-radius:10px; padding:14px 20px; box-shadow:0 1px 3px rgba(0,0,0,0.08); border-left:4px solid #27ae60; }
+.portfolio-card .pc-header { display:flex; justify-content:space-between; align-items:center; cursor:pointer; }
+.portfolio-card .pc-title { font-size:14px; font-weight:600; color:#2d3436; }
+.portfolio-card .pc-summary { font-size:13px; color:#636e72; }
+.portfolio-card .pc-body { margin-top:10px; display:none; }
+.portfolio-card .pc-body.show { display:block; }
+.portfolio-card .pc-item { display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid #f1f2f6; font-size:13px; }
+.portfolio-card .pc-item:last-child { border-bottom:none; }
+.overfit-warn { display:inline-block; background:#fff3cd; color:#856404; padding:4px 12px; border-radius:4px; font-size:12px; font-weight:600; margin-top:6px; }
+
+.equity-chart { margin:12px 0; background:#fff; border-radius:8px; padding:8px; }
+.equity-chart svg { width:100%; height:auto; }
+.monthly-grid { display:flex; flex-wrap:wrap; gap:4px; margin:12px 0; }
+.month-cell { width:52px; height:44px; border-radius:4px; display:flex; flex-direction:column; align-items:center; justify-content:center; font-size:11px; }
+.month-cell .ml { color:#636e72; font-size:10px; }
+.month-cell .mv { font-weight:600; font-size:12px; }
+
+.health-panel { margin:0 24px 8px; background:#fff; border-radius:10px; box-shadow:0 1px 3px rgba(0,0,0,0.08); overflow:hidden; }
+.health-header { display:flex; justify-content:space-between; align-items:center; padding:12px 20px; cursor:pointer; }
+.health-header .hh-title { font-size:14px; font-weight:600; }
+.health-header .hh-badge { background:#e74c3c; color:#fff; border-radius:10px; padding:2px 8px; font-size:11px; font-weight:600; }
+.health-header .hh-badge.ok { background:#27ae60; }
+.health-body { display:none; padding:0 20px 12px; }
+.health-body.show { display:block; }
+.health-item { padding:8px 12px; margin-bottom:6px; border-radius:6px; font-size:13px; border-left:4px solid #ddd; background:#fafbfc; }
+.health-item.danger { border-left-color:#e74c3c; background:#fdf2f2; }
+.health-item.warning { border-left-color:#e67e22; background:#fef9f0; }
+.health-item.info { border-left-color:#3498db; background:#f0f7ff; }
+.health-item .hi-title { font-weight:600; margin-bottom:2px; }
+.health-item .hi-detail { color:#636e72; font-size:12px; }
+
+.wf-table td, .wf-table th { padding:6px 10px; font-size:12px; }
+.sens-table td, .sens-table th { padding:6px 10px; font-size:12px; }
+.sens-table tr.current { background:#e8f5e9; font-weight:600; }
+.regime-table td, .regime-table th { padding:6px 10px; font-size:12px; }
+.regime-bull { background:#f0fff4; }
+.regime-bear { background:#fdf2f2; }
+.regime-sideways { background:#f8f9fa; }
+.verdict-stable { color:#27ae60; font-weight:700; }
+.verdict-sensitive { color:#e67e22; font-weight:700; }
+.verdict-highly_sensitive { color:#e74c3c; font-weight:700; }
+
 .holding-star { color: #f39c12; font-size: 12px; }
 
 .detail-row { display: none; }
@@ -435,11 +484,13 @@ tr.filtered-row:hover td { opacity: 0.7; }
     <div class="bench" id="bench"></div>
     <div class="time" id="scan-time"></div>
     <button class="btn" id="refresh-btn" onclick="refresh()" style="margin-top:8px">刷新数据</button>
+    <button class="btn" id="auto-refresh-btn" onclick="toggleAutoRefresh()" style="margin-top:8px;margin-left:6px;font-size:12px;background:#636e72">自动: 关</button>
   </div>
 </div>
 
 <div class="tab-bar">
   <button class="tab-btn active" onclick="switchTab('monitor')">监控</button>
+  <button class="tab-btn" onclick="switchTab('sectors')">行业扫描</button>
   <button class="tab-btn" onclick="switchTab('strategy')">策略</button>
   <button class="tab-btn" onclick="switchTab('settings')">设置</button>
 </div>
@@ -483,6 +534,8 @@ tr.filtered-row:hover td { opacity: 0.7; }
   </div>
 </div>
 <div class="stats" id="sig-stats" style="padding-top:0"></div>
+<div class="health-panel" id="health-panel" style="display:none"></div>
+<div class="portfolio-card" id="portfolio-card"></div>
 
 <div class="filters">
   <div class="filter-group" id="cat-filter">
@@ -527,6 +580,26 @@ tr.filtered-row:hover td { opacity: 0.7; }
     </thead>
     <tbody id="tbody"></tbody>
   </table>
+</div>
+</div>
+
+<!-- ============ 行业扫描 Tab ============ -->
+<div class="tab-content" id="tab-sectors">
+<div class="strat-wrap" style="max-width:1100px">
+<div class="strat-section">
+  <h3>行业右侧扫描 <span style="font-size:12px;color:#636e72;font-weight:normal">20个行业ETF · 日线均线打分</span></h3>
+  <div class="strat-doc" style="margin-bottom:12px;font-size:12px;line-height:1.8">
+    <p><strong>打分规则:</strong> 价格>MA5(+1) MA10(+1) MA20(+2) MA60(+2) | MA20>MA60(+2) | 5日涨(+1) 10日涨(+1) | 20日新高(+2) MA20上行(+1)</p>
+    <p>扣分: 价格&lt;MA20(-2) 价格&lt;MA60(-1) 20日新低(-2) MA20下行(-1)</p>
+    <p>判定: <strong style="color:#27ae60">≥8强右侧</strong> <strong style="color:#3498db">≥5右侧</strong> <strong style="color:#e67e22">≥3右侧初现</strong> &lt;3震荡</p>
+    <p style="color:#e67e22;margin-top:4px">⚠ 此扫描器只看日线，不含月线/周线过滤。"右侧初现"仅代表日线走强，需到"监控"Tab确认多周期趋势。</p>
+  </div>
+  <div id="sector-loading" style="text-align:center;padding:20px;color:#636e72">加载中...</div>
+  <table id="sector-table" style="display:none">
+    <thead><tr><th>板块</th><th>得分</th><th>状态</th><th>5日涨幅</th><th>持仓</th></tr></thead>
+    <tbody id="sector-body"></tbody>
+  </table>
+</div>
 </div>
 </div>
 
@@ -627,6 +700,15 @@ tr.filtered-row:hover td { opacity: 0.7; }
         <label>超卖</label><input type="number" id="p-kdj-oversold" value="20" min="0" max="50">
       </div>
     </div>
+    <div class="param-row">
+      <div class="param-label">加分项</div>
+      <div class="param-inputs">
+        <label>新高周期</label><input type="number" id="p-new-high" value="20" min="5" max="120">
+        <label>长MA</label><input type="number" id="p-ma-long" value="60" min="20" max="200">
+        <label>RSI周期</label><input type="number" id="p-rsi-period" value="14" min="5" max="30">
+        <label>RSI阈值</label><input type="number" id="p-rsi-thresh" value="50" min="30" max="80">
+      </div>
+    </div>
   </div>
 </div>
 
@@ -662,6 +744,9 @@ tr.filtered-row:hover td { opacity: 0.7; }
   </div>
   <div class="strat-actions">
     <button class="btn-primary" id="btn-bt" onclick="runBacktest()">运行回测</button>
+    <button class="btn-primary" id="btn-wf" onclick="runWalkForward()" style="background:#6c5ce7">Walk-Forward</button>
+    <button class="btn-primary" id="btn-sens" onclick="runSensitivity()" style="background:#e67e22">参数敏感性</button>
+    <button class="btn-primary" id="btn-regime" onclick="runRegime()" style="background:#00b894">市场环境</button>
     <button class="btn-secondary" onclick="resetConfig()">恢复默认</button>
     <button class="btn-success" onclick="saveStrategyConfig()">保存配置</button>
   </div>
@@ -738,6 +823,32 @@ tr.filtered-row:hover td { opacity: 0.7; }
     <button class="btn-success" onclick="saveSettings()">保存设置</button>
   </div>
 </div>
+<div class="settings-section" style="margin-top:16px">
+  <h3>组合配置</h3>
+  <div class="field">
+    <label>总资金 (元)</label>
+    <input type="number" id="s-total-capital" value="500000" min="10000" step="10000">
+  </div>
+  <div class="field">
+    <label>最大持仓数</label>
+    <input type="number" id="s-max-positions" value="5" min="1" max="20">
+  </div>
+  <div class="field">
+    <label>单仓上限 (%)</label>
+    <input type="number" id="s-max-single" value="30" min="5" max="100" step="5">
+  </div>
+  <div class="field">
+    <label>突破建仓 (%)</label>
+    <input type="number" id="s-breakout-pct" value="20" min="5" max="50" step="5">
+  </div>
+  <div class="field">
+    <label>回踩加仓 (%)</label>
+    <input type="number" id="s-pullback-pct" value="25" min="5" max="50" step="5">
+  </div>
+  <div class="strat-actions">
+    <button class="btn-success" onclick="saveSettings()">保存组合配置</button>
+  </div>
+</div>
 </div>
 </div>
 
@@ -749,6 +860,7 @@ let catFilter = 'all';
 let sigFilter = 'all';
 let tierFilter = 'all';
 let condEnabled = [true, true, true, true];
+let autoRefreshId = null;
 
 function switchTab(name) {
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
@@ -757,6 +869,7 @@ function switchTab(name) {
   document.querySelector('.tab-btn[onclick*="' + name + '"]').classList.add('active');
   if (name === 'strategy') loadStrategyConfig();
   if (name === 'settings') loadSettings();
+  if (name === 'sectors') loadSectors();
 }
 
 async function loadData(force) {
@@ -819,6 +932,7 @@ function renderAll() {
     '<div class="stat-card"><div class="label">持仓标的</div><div class="value" style="color:#0984e3">' + holdN + '</div></div>';
 
   renderSigStats();
+  renderHealthCheck();
   renderTable();
 }
 
@@ -839,6 +953,22 @@ function renderSigStats() {
     '<div class="stat-card"><div class="label">超买提醒</div><div class="value" style="color:#e67e22">' + overboughtN + '</div></div>' +
     '<div class="stat-card"><div class="label">强势持仓</div><div class="value" style="color:#3498db">' + strongN + '</div></div>' +
     '<div class="stat-card"><div class="label">观望</div><div class="value" style="color:#95a5a6">' + watchN + '</div></div>';
+  renderPortfolio();
+}
+
+function renderPortfolio() {
+  var el = document.getElementById('portfolio-card');
+  if (!DATA || !DATA.portfolio || tierFilter !== 'all') { el.style.display = 'none'; return; }
+  var p = DATA.portfolio;
+  if (p.selected === 0) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  var items = '';
+  for (var k = 0; k < p.advice.length; k++) {
+    var a = p.advice[k];
+    var sigCls = a.signal.indexOf('\u7a81\u7834') >= 0 ? 'breakout' : 'pullback';
+    items += '<div class="pc-item"><span>' + a.name + ' <span class="signal-badge signal-' + sigCls + '">' + a.signal + '</span></span><span>\u4ed3\u4f4d ' + (a.position_pct * 100).toFixed(0) + '% \u00b7 \u00a5' + a.amount.toLocaleString() + '</span></div>';
+  }
+  el.innerHTML = '<div class="pc-header" onclick="this.nextElementSibling.classList.toggle(\'show\')"><span class="pc-title">\u7ec4\u5408\u5efa\u8bae \u00b7 ' + p.selected + '\u4e2a\u6807\u7684 \u00b7 \u603b\u4ed3\u4f4d' + (p.total_allocation_pct * 100).toFixed(0) + '%</span><span class="pc-summary">' + p.current_signals + '\u4e2a\u4fe1\u53f7 / \u6700\u591a' + p.max_positions + '\u6301\u4ed3 \u25be</span></div><div class="pc-body">' + items + '</div>';
 }
 
 function renderTable() {
@@ -921,6 +1051,9 @@ function renderTable() {
         '<div class="item"><span class="k">MACD柱</span><span class="' + chgClass(r.macd_hist) + '">' + r.macd_hist.toFixed(4) + '</span></div>' +
         '<div class="item"><span class="k">RSI</span><span>' + (r.rsi || '-') + '</span></div>' +
         '<div class="item"><span class="k">量比</span><span>' + (r.vol_ratio || '-') + '</span></div>' +
+        '<div class="item"><span class="k">KDJ-K</span><span>' + (r.kdj_k != null ? r.kdj_k : '-') + '</span></div>' +
+        '<div class="item"><span class="k">KDJ-D</span><span>' + (r.kdj_d != null ? r.kdj_d : '-') + '</span></div>' +
+        '<div class="item"><span class="k">KDJ-J</span><span>' + (r.kdj_j != null ? r.kdj_j : '-') + '</span></div>' +
       '</div>' +
       '<div class="detail-block"><h4>假设入场</h4>' +
         '<div class="item"><span class="k">追踪止损</span><span>' + r.stop_price.toFixed(3) + '</span></div>' +
@@ -1059,7 +1192,7 @@ function collectConfig() {
       ma_exit_period: parseInt(document.getElementById('p-ma-exit').value),
       ma_exit_days: parseInt(document.getElementById('p-ma-exit-days').value),
     },
-    bonus: { new_high_period: 20, ma_long_period: 60, rsi_period: 14, rsi_threshold: 50 }
+    bonus: { new_high_period: parseInt(document.getElementById('p-new-high').value), ma_long_period: parseInt(document.getElementById('p-ma-long').value), rsi_period: parseInt(document.getElementById('p-rsi-period').value), rsi_threshold: parseInt(document.getElementById('p-rsi-thresh').value) }
   };
 }
 
@@ -1111,6 +1244,12 @@ function populateForm(cfg) {
   const kdjTog = document.getElementById('tog-kdj');
   if (e.use_kdj) { kdjTog.classList.add('on'); document.getElementById('kdj-params').style.opacity='1'; }
   else { kdjTog.classList.remove('on'); document.getElementById('kdj-params').style.opacity='0.4'; }
+
+  var b = cfg.bonus || {};
+  document.getElementById('p-new-high').value = b.new_high_period || 20;
+  document.getElementById('p-ma-long').value = b.ma_long_period || 60;
+  document.getElementById('p-rsi-period').value = b.rsi_period || 14;
+  document.getElementById('p-rsi-thresh').value = b.rsi_threshold || 50;
 }
 
 function loadStrategyConfig() {
@@ -1166,7 +1305,27 @@ function renderBtResult(r) {
     '<div class="bt-metric"><div class="v">' + r.win_rate + '%</div><div class="l">胜率</div></div>' +
     '<div class="bt-metric"><div class="v up">+' + r.avg_win + '%</div><div class="l">平均盈</div></div>' +
     '<div class="bt-metric"><div class="v down">' + r.avg_loss + '%</div><div class="l">平均亏</div></div>' +
-    '</div>';
+    (r.total_cost ? '<div class="bt-metric"><div class="v">\u00a5' + r.total_cost.toFixed(0) + '</div><div class="l">\u4ea4\u6613\u6210\u672c</div></div>' : '');
+  if (r.sortino !== undefined) h += '<div class="bt-metric"><div class="v">' + (r.sortino !== null ? r.sortino.toFixed(2) : '-') + '</div><div class="l">Sortino</div></div>';
+  if (r.calmar !== undefined) h += '<div class="bt-metric"><div class="v">' + (r.calmar !== null ? r.calmar.toFixed(2) : '-') + '</div><div class="l">Calmar</div></div>';
+  if (r.profit_factor !== undefined) h += '<div class="bt-metric"><div class="v">' + (r.profit_factor !== null ? r.profit_factor.toFixed(2) : '-') + '</div><div class="l">盈亏比PF</div></div>';
+  if (r.bench_return !== undefined) h += '<div class="bt-metric"><div class="v ' + (r.bench_return > 0 ? 'up' : 'down') + '">' + (r.bench_return>0?'+':'') + r.bench_return + '%</div><div class="l">基准收益</div></div>';
+  if (r.exposure_pct !== undefined) h += '<div class="bt-metric"><div class="v">' + r.exposure_pct.toFixed(0) + '%</div><div class="l">暴露时间</div></div>';
+  if (r.max_consec_loss !== undefined) h += '<div class="bt-metric"><div class="v">' + r.max_consec_loss + '</div><div class="l">最大连亏</div></div>';
+  h += '</div>';
+  if (r.equity_curve && r.equity_curve.length >= 2) {
+    h += renderEquitySvg(r.equity_curve, r.bench_curve, r.trade_list);
+  }
+  if (r.monthly_returns && r.monthly_returns.length) {
+    h += '<div style="margin:8px 0"><strong style="font-size:13px">月度收益分解</strong></div><div class="monthly-grid">';
+    for (const m of r.monthly_returns) {
+      const ret = m.ret;
+      const bg = ret > 0 ? 'rgba(39,174,96,' + Math.min(Math.abs(ret)/10, 0.6).toFixed(2) + ')' : (ret < 0 ? 'rgba(231,76,60,' + Math.min(Math.abs(ret)/10, 0.6).toFixed(2) + ')' : '#f8f9fa');
+      const color = Math.abs(ret) > 5 ? '#fff' : '#2d3436';
+      h += '<div class="month-cell" style="background:' + bg + ';color:' + color + '"><span class="ml">' + m.month + '</span><span class="mv">' + (ret>0?'+':'') + ret.toFixed(1) + '%</span></div>';
+    }
+    h += '</div>';
+  }
   if (r.trade_list && r.trade_list.length) {
     h += '<div class="bt-trades"><table><thead><tr><th>入场</th><th>出场</th><th>入价</th><th>出价</th><th>收益</th><th>天数</th><th>原因</th></tr></thead><tbody>';
     for (const t of r.trade_list) {
@@ -1212,6 +1371,12 @@ function renderOptResult(r) {
       '<div>MA=' + p.ma_period + '  Base_K=' + p.base_k + '  Min_K=' + p.min_k + '  止损=' + (p.hard_stop_pct*100).toFixed(0) + '%</div>' +
       '<div style="margin-top:4px;font-size:13px;color:#636e72">收益' + (r.best.avg_return>0?'+':'') + r.best.avg_return + '% | 回撤' + r.best.avg_drawdown + '% | 胜率' + r.best.avg_winrate + '% | ' + r.best.total_trades + '笔</div>' +
       '<button class="btn-secondary" style="margin-top:8px;font-size:12px;padding:6px 14px" onclick="applyOptResult()">应用此参数</button></div>';
+    if (r.train_return !== undefined && r.test_return !== undefined) {
+      h += '<div style="margin-top:8px;font-size:13px;color:#636e72">\u8bad\u7ec3\u96c6\u6536\u76ca: ' + (r.train_return>0?'+':'') + r.train_return + '% | \u6d4b\u8bd5\u96c6\u6536\u76ca: ' + (r.test_return>0?'+':'') + r.test_return + '%</div>';
+    }
+    if (r.overfit_warning) {
+      h += '<div class="overfit-warn">\u26a0\ufe0f \u8fc7\u62df\u5408\u8b66\u544a: \u6d4b\u8bd5\u96c6\u6536\u76ca\u8fdc\u4f4e\u4e8e\u8bad\u7ec3\u96c6\uff0c\u53c2\u6570\u53ef\u80fd\u8fc7\u5ea6\u62df\u5408\u5386\u53f2\u6570\u636e</div>';
+    }
   }
   if (r.rankings && r.rankings.length > 1) {
     h += '<div class="opt-table"><table><thead><tr><th>#</th><th>MA</th><th>K</th><th>止损</th><th>评分</th><th>收益</th><th>回撤</th><th>胜率</th><th>交易</th></tr></thead><tbody>';
@@ -1275,6 +1440,12 @@ function loadSettings() {
     document.querySelector('input[name=data_source][value="' + (s.data_source || 'tencent') + '"]').checked = true;
     document.getElementById('tushare-token').value = s.tushare_token || '';
     document.getElementById('fetch-schedule').value = s.fetch_schedule || '16:00';
+    var p = s.portfolio || {};
+    document.getElementById('s-total-capital').value = p.total_capital || 500000;
+    document.getElementById('s-max-positions').value = p.max_positions || 5;
+    document.getElementById('s-max-single').value = Math.round((p.max_single_pct || 0.3) * 100);
+    document.getElementById('s-breakout-pct').value = Math.round((p.breakout_pct || 0.2) * 100);
+    document.getElementById('s-pullback-pct').value = Math.round((p.pullback_pct || 0.25) * 100);
     toggleTushareFields();
     document.getElementById('test-result').innerHTML = '';
     document.getElementById('settings-status').style.display = 'none';
@@ -1309,10 +1480,17 @@ function saveSettings() {
   const ds = document.querySelector('input[name=data_source]:checked').value;
   const token = document.getElementById('tushare-token').value.trim();
   const schedule = document.getElementById('fetch-schedule').value;
+  const portfolio = {
+    total_capital: parseInt(document.getElementById('s-total-capital').value),
+    max_positions: parseInt(document.getElementById('s-max-positions').value),
+    max_single_pct: parseInt(document.getElementById('s-max-single').value) / 100,
+    breakout_pct: parseInt(document.getElementById('s-breakout-pct').value) / 100,
+    pullback_pct: parseInt(document.getElementById('s-pullback-pct').value) / 100,
+  };
   const el = document.getElementById('settings-status');
   fetch('/api/settings', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({data_source: ds, tushare_token: token, fetch_schedule: schedule})
+    body: JSON.stringify({data_source: ds, tushare_token: token, fetch_schedule: schedule, portfolio: portfolio})
   }).then(r => r.json()).then(d => {
     el.style.display = 'block';
     el.innerHTML = '<div class="test-result test-ok">' + (d.msg || '已保存') + '</div>';
@@ -1321,6 +1499,272 @@ function saveSettings() {
     el.style.display = 'block';
     el.innerHTML = '<div class="test-result test-fail">保存失败: ' + e + '</div>';
   });
+}
+
+function toggleAutoRefresh() {
+  const btn = document.getElementById('auto-refresh-btn');
+  if (autoRefreshId) {
+    clearInterval(autoRefreshId);
+    autoRefreshId = null;
+    btn.textContent = '自动: 关';
+    btn.style.background = '#636e72';
+  } else {
+    autoRefreshId = setInterval(() => loadData(true), 300000);
+    btn.textContent = '自动: 开';
+    btn.style.background = '#00b894';
+  }
+}
+
+function renderHealthCheck() {
+  const panel = document.getElementById('health-panel');
+  if (!DATA || !DATA.health_check) { panel.style.display = 'none'; return; }
+  const checks = DATA.health_check;
+  if (!checks.length) {
+    panel.style.display = 'block';
+    panel.innerHTML = '<div class="health-header"><span class="hh-title">策略健康检查</span><span class="hh-badge ok">正常</span></div><div class="health-body show"><div style="color:#27ae60;font-size:13px;padding:4px 0">\u2713 系统运行正常</div></div>';
+    return;
+  }
+  const hasDanger = checks.some(c => c.severity === 'danger');
+  const badgeClass = hasDanger ? '' : 'ok';
+  const badgeText = hasDanger ? checks.length + '项警告' : checks.length + '项提醒';
+  let items = '';
+  for (const c of checks) {
+    items += '<div class="health-item ' + c.severity + '"><div class="hi-title">' + c.title + '</div><div class="hi-detail">' + c.detail + '</div></div>';
+  }
+  const bodyClass = hasDanger ? 'health-body show' : 'health-body';
+  panel.style.display = 'block';
+  panel.innerHTML = '<div class="health-header" onclick="this.nextElementSibling.classList.toggle(\'show\')"><span class="hh-title">策略健康检查</span><span class="hh-badge ' + badgeClass + '">' + badgeText + '</span></div><div class="' + bodyClass + '">' + items + '</div>';
+}
+
+function renderEquitySvg(equityCurve, benchCurve, tradeList) {
+  if (!equityCurve || equityCurve.length < 2) return '';
+  const W = 720, H = 260, P = {t:20, r:20, b:30, l:60};
+  const cw = W - P.l - P.r, ch = H - P.t - P.b;
+  let allVals = equityCurve.map(e => e.v);
+  if (benchCurve && benchCurve.length) allVals = allVals.concat(benchCurve.map(e => e.v));
+  const minV = Math.min(...allVals) * 0.98;
+  const maxV = Math.max(...allVals) * 1.02;
+  const rangeV = maxV - minV || 1;
+  const xScale = (i, arr) => P.l + (i / (arr.length - 1)) * cw;
+  const yScale = v => P.t + ch - ((v - minV) / rangeV) * ch;
+  let stratPath = 'M', fillPath = 'M';
+  for (let i = 0; i < equityCurve.length; i++) {
+    const x = xScale(i, equityCurve), y = yScale(equityCurve[i].v);
+    stratPath += (i ? 'L' : '') + x.toFixed(1) + ',' + y.toFixed(1);
+    fillPath += (i ? 'L' : '') + x.toFixed(1) + ',' + y.toFixed(1);
+  }
+  fillPath += 'L' + xScale(equityCurve.length-1, equityCurve).toFixed(1) + ',' + (P.t+ch) + 'L' + P.l + ',' + (P.t+ch) + 'Z';
+  let benchPath = '';
+  if (benchCurve && benchCurve.length >= 2) {
+    benchPath = 'M';
+    for (let i = 0; i < benchCurve.length; i++) {
+      const x = xScale(i, benchCurve), y = yScale(benchCurve[i].v);
+      benchPath += (i ? 'L' : '') + x.toFixed(1) + ',' + y.toFixed(1);
+    }
+  }
+  let yLabels = '';
+  for (let i = 0; i <= 3; i++) {
+    const v = minV + (rangeV * i / 3);
+    const y = yScale(v);
+    yLabels += '<text x="' + (P.l-5) + '" y="' + y.toFixed(1) + '" text-anchor="end" font-size="10" fill="#636e72">' + Math.round(v).toLocaleString() + '</text>';
+    yLabels += '<line x1="' + P.l + '" y1="' + y.toFixed(1) + '" x2="' + (W-P.r) + '" y2="' + y.toFixed(1) + '" stroke="#f1f2f6" stroke-width="1"/>';
+  }
+  let xLabels = '';
+  const dates = equityCurve.map(e => e.d);
+  const xIdxs = [0, Math.floor(dates.length/3), Math.floor(dates.length*2/3), dates.length-1];
+  for (const idx of xIdxs) {
+    if (idx < dates.length) {
+      const x = xScale(idx, equityCurve);
+      xLabels += '<text x="' + x.toFixed(1) + '" y="' + (H-5) + '" text-anchor="middle" font-size="10" fill="#636e72">' + dates[idx] + '</text>';
+    }
+  }
+  let markers = '';
+  if (tradeList && tradeList.length && equityCurve.length) {
+    const dateMap = {};
+    equityCurve.forEach((e, i) => { dateMap[e.d] = i; });
+    for (const t of tradeList) {
+      if (dateMap[t.entry_date] !== undefined) {
+        const idx = dateMap[t.entry_date];
+        const x = xScale(idx, equityCurve), y = yScale(equityCurve[idx].v);
+        markers += '<polygon points="' + x + ',' + (y+2) + ' ' + (x-4) + ',' + (y+8) + ' ' + (x+4) + ',' + (y+8) + '" fill="#27ae60"/>';
+      }
+      if (dateMap[t.exit_date] !== undefined) {
+        const idx = dateMap[t.exit_date];
+        const x = xScale(idx, equityCurve), y = yScale(equityCurve[idx].v);
+        markers += '<polygon points="' + x + ',' + (y-2) + ' ' + (x-4) + ',' + (y-8) + ' ' + (x+4) + ',' + (y-8) + '" fill="#e74c3c"/>';
+      }
+    }
+  }
+  return '<div class="equity-chart"><svg viewBox="0 0 ' + W + ' ' + H + '">' +
+    yLabels + xLabels +
+    '<path d="' + fillPath + '" fill="rgba(9,132,227,0.08)"/>' +
+    '<path d="' + stratPath + '" fill="none" stroke="#0984e3" stroke-width="1.5"/>' +
+    (benchPath ? '<path d="' + benchPath + '" fill="none" stroke="#b2bec3" stroke-width="1" stroke-dasharray="4,3"/>' : '') +
+    markers +
+    '<text x="' + (P.l+5) + '" y="' + (P.t+12) + '" font-size="10" fill="#0984e3">\u7b56\u7565</text>' +
+    (benchPath ? '<text x="' + (P.l+45) + '" y="' + (P.t+12) + '" font-size="10" fill="#b2bec3">\u57fa\u51c6</text>' : '') +
+    '</svg></div>';
+}
+
+async function runWalkForward() {
+  const btn = document.getElementById('btn-wf');
+  btn.disabled = true; btn.textContent = 'Walk-Forward中...';
+  const sym = document.getElementById('bt-symbol').value;
+  const days = parseInt(document.getElementById('bt-days').value);
+  try {
+    const resp = await fetch('/api/walk-forward', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({symbol: sym, days: days})
+    });
+    const r = await resp.json();
+    renderWalkForward(r);
+  } catch(e) {
+    document.getElementById('bt-result').innerHTML = '<div class="test-result test-fail">Walk-Forward失败: '+e+'</div>';
+  }
+  btn.disabled = false; btn.textContent = 'Walk-Forward';
+}
+
+function renderWalkForward(r) {
+  const el = document.getElementById('bt-result');
+  if (r.error) { el.innerHTML = '<div class="test-result test-fail">' + r.error + '</div>'; return; }
+  let h = '<h3 style="margin:12px 0 8px;font-size:15px">Walk-Forward验证 (' + r.total_windows + '个窗口)</h3>';
+  h += '<div class="bt-metrics">' +
+    '<div class="bt-metric"><div class="v ' + (r.avg_oos_return > 0 ? 'up' : 'down') + '">' + (r.avg_oos_return > 0 ? '+' : '') + r.avg_oos_return.toFixed(1) + '%</div><div class="l">样本外平均收益</div></div>' +
+    '<div class="bt-metric"><div class="v">' + r.consistency_pct.toFixed(0) + '%</div><div class="l">一致性</div></div>' +
+    '<div class="bt-metric"><div class="v">' + r.param_stability.toFixed(0) + '%</div><div class="l">参数稳定性</div></div>' +
+    '</div>';
+  if (r.consistency_pct < 50) {
+    h += '<div class="overfit-warn" style="background:#fdf2f2;color:#e74c3c;border:1px solid #e74c3c33">超过半数测试窗口亏损，策略可能过拟合</div>';
+  }
+  if (r.param_stability < 60) {
+    h += '<div class="overfit-warn" style="margin-top:4px">最优参数频繁变化，策略对参数敏感</div>';
+  }
+  if (r.windows && r.windows.length) {
+    h += '<div style="margin-top:12px;overflow-x:auto"><table class="wf-table"><thead><tr><th>#</th><th>训练期</th><th>测试期</th><th>最优参数</th><th>样本外收益</th><th>交易数</th><th>最大回撤</th></tr></thead><tbody>';
+    r.windows.forEach((w, i) => {
+      const retCls = w.oos_return > 0 ? 'up' : 'down';
+      const bp = w.best_params || {};
+      const paramStr = 'K=' + (bp.base_k||'-') + ' MinK=' + (bp.min_k||'-');
+      h += '<tr><td>' + (i+1) + '</td><td>' + w.train_period + '</td><td>' + w.test_period + '</td><td style="font-size:11px">' + paramStr + '</td><td class="' + retCls + '">' + (w.oos_return>0?'+':'') + w.oos_return.toFixed(1) + '%</td><td>' + w.oos_trades + '</td><td>' + w.oos_max_dd.toFixed(1) + '%</td></tr>';
+    });
+    h += '</tbody></table></div>';
+  }
+  el.innerHTML = h;
+}
+
+async function runSensitivity() {
+  const btn = document.getElementById('btn-sens');
+  btn.disabled = true; btn.textContent = '分析中...';
+  const cfg = collectConfig();
+  const sym = document.getElementById('bt-symbol').value;
+  const days = parseInt(document.getElementById('bt-days').value);
+  try {
+    const resp = await fetch('/api/sensitivity', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({symbol: sym, days: days, config: cfg})
+    });
+    const r = await resp.json();
+    renderSensitivity(r);
+  } catch(e) {
+    document.getElementById('bt-result').innerHTML = '<div class="test-result test-fail">敏感性分析失败: '+e+'</div>';
+  }
+  btn.disabled = false; btn.textContent = '参数敏感性';
+}
+
+function renderSensitivity(r) {
+  const el = document.getElementById('bt-result');
+  if (r.error) { el.innerHTML = '<div class="test-result test-fail">' + r.error + '</div>'; return; }
+  let h = '<h3 style="margin:12px 0 8px;font-size:15px">参数敏感性分析</h3>';
+  const vClass = 'verdict-' + r.verdict;
+  const vLabels = {stable:'稳定', sensitive:'敏感', highly_sensitive:'高度敏感'};
+  h += '<div class="bt-metrics"><div class="bt-metric"><div class="v ' + vClass + '">' + (vLabels[r.verdict] || r.verdict) + '</div><div class="l">判定</div></div>' +
+    '<div class="bt-metric"><div class="v">' + r.spread.toFixed(1) + '%</div><div class="l">收益差异</div></div></div>';
+  if (r.verdict === 'highly_sensitive') {
+    h += '<div class="overfit-warn" style="background:#fdf2f2;color:#e74c3c;border:1px solid #e74c3c33">参数微调导致收益大幅波动，策略可能过拟合</div>';
+  }
+  if (r.results && r.results.length) {
+    h += '<div style="margin-top:12px;overflow-x:auto"><table class="sens-table"><thead><tr><th>参数组合</th><th>总收益</th><th>最大回撤</th><th>交易数</th><th>胜率</th><th>Sharpe</th></tr></thead><tbody>';
+    for (const s of r.results) {
+      const cls = s.is_current ? ' class="current"' : '';
+      const retCls = s.total_return > 0 ? 'up' : 'down';
+      h += '<tr' + cls + '><td>' + s.label + (s.is_current ? ' \u2605' : '') + '</td><td class="' + retCls + '">' + (s.total_return>0?'+':'') + s.total_return.toFixed(1) + '%</td><td>' + s.max_drawdown.toFixed(1) + '%</td><td>' + s.trades + '</td><td>' + s.win_rate.toFixed(0) + '%</td><td>' + s.sharpe.toFixed(2) + '</td></tr>';
+    }
+    h += '</tbody></table></div>';
+  }
+  el.innerHTML = h;
+}
+
+async function runRegime() {
+  const btn = document.getElementById('btn-regime');
+  btn.disabled = true; btn.textContent = '分析中...';
+  const cfg = collectConfig();
+  const sym = document.getElementById('bt-symbol').value;
+  const days = parseInt(document.getElementById('bt-days').value);
+  try {
+    const resp = await fetch('/api/regime', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({symbol: sym, days: days, config: cfg})
+    });
+    const r = await resp.json();
+    renderRegime(r);
+  } catch(e) {
+    document.getElementById('bt-result').innerHTML = '<div class="test-result test-fail">市场环境分析失败: '+e+'</div>';
+  }
+  btn.disabled = false; btn.textContent = '市场环境';
+}
+
+function renderRegime(r) {
+  const el = document.getElementById('bt-result');
+  if (r.error) { el.innerHTML = '<div class="test-result test-fail">' + r.error + '</div>'; return; }
+  let h = '<h3 style="margin:12px 0 8px;font-size:15px">市场环境分析 \u2014 ' + (r.name || r.symbol) + '</h3>';
+  const sum = r.summary || {};
+  h += '<div class="bt-metrics">';
+  const types = [{k:'bull',l:'牛市',c:'#27ae60'},{k:'bear',l:'熊市',c:'#e74c3c'},{k:'sideways',l:'震荡',c:'#636e72'}];
+  for (const t of types) {
+    const s = sum[t.k] || {};
+    h += '<div class="bt-metric" style="border-left:3px solid ' + t.c + '"><div class="v">' + t.l + '</div><div class="l">' + (s.trades||0) + '笔 \u00b7 胜率' + (s.win_rate||0).toFixed(0) + '%</div></div>';
+  }
+  h += '</div>';
+  if (sum.bear && sum.bear.win_rate < 40) {
+    h += '<div class="overfit-warn" style="margin-top:4px">该策略在熊市表现较差(胜率' + sum.bear.win_rate.toFixed(0) + '%)，熊市阶段应减仓</div>';
+  }
+  if (r.phases && r.phases.length) {
+    h += '<div style="margin-top:12px;overflow-x:auto"><table class="regime-table"><thead><tr><th>阶段</th><th>类型</th><th>期间</th><th>基准收益</th><th>交易数</th><th>胜率</th><th>平均PnL</th><th>总PnL</th></tr></thead><tbody>';
+    for (const p of r.phases) {
+      const typeCls = 'regime-' + p.type;
+      const typeLabel = {bull:'牛市', bear:'熊市', sideways:'震荡'}[p.type] || p.type;
+      h += '<tr class="' + typeCls + '"><td>' + p.name + '</td><td>' + typeLabel + '</td><td style="font-size:11px">' + p.start + '~' + p.end + '</td><td class="' + (p.bench_return > 0 ? 'up' : 'down') + '">' + (p.bench_return>0?'+':'') + p.bench_return.toFixed(1) + '%</td><td>' + p.trades + '</td><td>' + p.win_rate.toFixed(0) + '%</td><td>' + (p.avg_pnl>0?'+':'') + p.avg_pnl.toFixed(1) + '%</td><td class="' + (p.total_pnl > 0 ? 'up' : 'down') + '">' + (p.total_pnl>0?'+':'') + p.total_pnl.toFixed(1) + '%</td></tr>';
+    }
+    h += '</tbody></table></div>';
+  }
+  el.innerHTML = h;
+}
+
+async function loadSectors() {
+  const loading = document.getElementById('sector-loading');
+  const table = document.getElementById('sector-table');
+  loading.style.display = 'block'; table.style.display = 'none';
+  try {
+    const resp = await fetch('/api/sectors');
+    const sectors = await resp.json();
+    if (sectors.error) { loading.innerHTML = '<span style="color:#e74c3c">加载失败: ' + sectors.error + '</span>'; return; }
+    let h = '';
+    for (const s of sectors) {
+      const scoreColor = s.score >= 8 ? '#27ae60' : (s.score >= 5 ? '#3498db' : (s.score >= 3 ? '#e67e22' : '#95a5a6'));
+      const rowBg = s.score >= 5 ? '#f0fff4' : (s.score >= 3 ? '#fef9f0' : '');
+      const holdTag = s.holding ? ' <span style="color:#f39c12;font-size:11px">★持仓</span>' : '';
+      const chgCls = s.change_pct > 0 ? 'up' : (s.change_pct < 0 ? 'down' : 'flat');
+      h += '<tr style="background:' + rowBg + '"><td><b>' + s.name + '</b>' + holdTag + '</td>' +
+        '<td style="color:' + scoreColor + ';font-weight:700;font-size:18px">' + s.score + '</td>' +
+        '<td><span class="signal-badge ' + (s.score >= 3 ? 'signal-entry' : 'signal-none') + '">' + s.status + '</span></td>' +
+        '<td>' + s.detail + '</td>' +
+        '<td>' + (s.holding ? '★' : '') + '</td></tr>';
+    }
+    document.getElementById('sector-body').innerHTML = h;
+    loading.style.display = 'none'; table.style.display = '';
+  } catch(e) {
+    loading.innerHTML = '<span style="color:#e74c3c">加载失败: ' + e + '</span>';
+  }
 }
 
 loadData(false);
@@ -1370,6 +1814,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif self.path == "/api/optimize/results":
             self._send_json(load_optimize_results())
+
+        elif self.path == "/api/sectors":
+            try:
+                from a_sector_scanner import SECTOR_ETFS, fetch_sector_quotes, update_history, analyze_sector
+                quotes = fetch_sector_quotes()
+                history = update_history(quotes) if quotes else {}
+                results = []
+                for label, cfg in SECTOR_ETFS.items():
+                    entries = history.get(label, [])
+                    r = analyze_sector(label, entries)
+                    q = quotes.get(label, {}) if quotes else {}
+                    results.append({"name": label, "symbol": cfg["symbol"], "holding": cfg.get("holding", False), "score": r.get("score", 0), "status": r.get("status", ""), "detail": r.get("detail", ""), "price": q.get("close", 0), "change_pct": q.get("change_pct", 0)})
+                results.sort(key=lambda x: -x["score"])
+                self._send_json(results)
+            except Exception as e:
+                traceback.print_exc()
+                self._send_json({"error": str(e)}, 500)
 
         else:
             self.send_response(404)
@@ -1436,6 +1897,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 scope = data.get("scope", "global")
                 days = data.get("days", 1000)
                 result = run_optimization(scope, days)
+                self._send_json(result)
+            except Exception as e:
+                traceback.print_exc()
+                self._send_json({"error": str(e)}, 500)
+
+        elif self.path == "/api/walk-forward":
+            try:
+                symbol = data.get("symbol", "sz159516")
+                days = data.get("days", 1000)
+                result = run_walk_forward(symbol, days=days)
+                self._send_json(result)
+            except Exception as e:
+                traceback.print_exc()
+                self._send_json({"error": str(e)}, 500)
+
+        elif self.path == "/api/sensitivity":
+            try:
+                symbol = data.get("symbol", "sz159516")
+                days = data.get("days", 1000)
+                config = data.get("config")
+                result = run_param_sensitivity(symbol, config=config, days=days)
+                self._send_json(result)
+            except Exception as e:
+                traceback.print_exc()
+                self._send_json({"error": str(e)}, 500)
+
+        elif self.path == "/api/regime":
+            try:
+                symbol = data.get("symbol", "sz159516")
+                days = data.get("days", 1000)
+                config = data.get("config")
+                result = run_regime_analysis(symbol, config=config, days=days)
                 self._send_json(result)
             except Exception as e:
                 traceback.print_exc()
